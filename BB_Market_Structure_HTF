@@ -1,0 +1,1796 @@
+//@version=5
+indicator("Bollinger Band Mean Reversion with Market Structure", overlay=true)
+
+// ===== INPUT PARAMETERS =====
+
+// Bollinger Band Parameters
+bb_length = input.int(20, "Bollinger Length", minval=1, group="Bollinger Bands")
+bb_mult = input.float(2.0, "Bollinger StdDev", minval=0.1, step=0.1, group="Bollinger Bands")
+lookback = input.int(5, "Pattern Lookback Period", minval=1, group="Bollinger Bands")
+
+// Candlestick Pattern Parameters
+hammer_ratio = input.float(2.0, "Hammer/Hanging Man Shadow to Body Ratio", minval=0.1, step=0.1, group="Candlestick Patterns")
+band_proximity = input.float(0.3, "Band Proximity Percentage", minval=0.1, maxval=1.0, step=0.1, group="Candlestick Patterns")
+// Rejection Candle Parameter
+rejection_ratio = input.float(2.0, "Rejection Shadow to Body Ratio", minval=0.1, step=0.1, group="Candlestick Patterns")
+
+// Display Settings
+show_unfiltered_signals = input.bool(false, "Show Unfiltered Signals", group="Display Settings")
+show_risk_reward = input.bool(true, "Show Risk/Reward Box", group="Display Settings")
+min_risk_reward = input.float(1.0, "Minimum Risk/Reward Ratio", minval=0.1, step=0.1, group="Display Settings")
+risk_box_transp = input.int(70, "Risk/Reward Box Transparency", minval=0, maxval=100, group="Display Settings")
+dynamic_target = input.bool(true, "Dynamic Target Price", group="Display Settings", tooltip="If enabled, target price will update with Bollinger Bands")
+allow_multiple_trades = input.bool(false, "Allow Multiple Trade Signals", group="Display Settings", tooltip="If enabled, will show risk/reward boxes for new signals even if there's already an active trade")
+max_trades = input.int(3, "Maximum Concurrent Trades", minval=1, maxval=10, group="Display Settings", tooltip="Maximum number of concurrent trades to track per direction")
+
+// Intraday Trade Closure Settings
+close_intraday = input.bool(false, "Close Trades Intraday", group="Intraday Settings", tooltip="If enabled, will close trades at specified time if target or stop not hit")
+intraday_close_time = input.time(timestamp("1970-01-01T23:59:00"), "Intraday Close Time", group="Intraday Settings", tooltip="Time to close trades if still active")
+show_intraday_closures = input.bool(true, "Show Intraday Closures", group="Intraday Settings", tooltip="If enabled, will show markers for trades closed by intraday rule")
+
+// Risk Management Parameters
+account_capital = input.float(10000, "Account Capital", minval=100, group="Risk Management")
+risk_percentage = input.float(1.0, "Risk Percentage", minval=0.1, maxval=10, step=0.1, group="Risk Management")
+instrument_type = input.string("Forex", "Instrument Type", options=["Forex", "Stocks"], group="Risk Management")
+account_currency = input.string("USD", "Account Currency", options=["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF"], group="Risk Management")
+leverage = input.float(100, "Leverage (Forex Only)", minval=1, maxval=500, group="Risk Management")
+show_position_size = input.bool(true, "Show Position Size", group="Risk Management", tooltip="If enabled, will show position size on risk/reward boxes")
+fixed_lot_size = input.bool(false, "Use Fixed Lot Size", group="Risk Management")
+lot_size_value = input.float(0.1, "Fixed Lot Size Value", minval=0.01, step=0.01, group="Risk Management")
+
+// Market Structure Parameters
+tableLocation = input.string(defval='Top', options=['Top', 'Bottom'], title='Info Table Location', group='Market Structure')
+ms_lookback = input.int(defval=3, title='Pivot Lookback Period', group='Market Structure')
+pivotType = input.string(defval="High/Low", title="Pivot Type", options=["High/Low", "Close"], group='Market Structure')
+showPivotPoints = input.bool(title='Show Historical Pivot Points?', defval=false, group='Market Structure')
+
+// Timeframe Settings
+oneSet = input.timeframe(defval='240', title='First Timeframe', group='Higher Timeframe Levels')
+twoSet = input.timeframe(defval='D', title='Second Timeframe', group='Higher Timeframe Levels')
+threeSet = input.timeframe(defval='W', title='Third Timeframe', group='Higher Timeframe Levels')
+fourSet = input.timeframe(defval='M', title='Fourth Timeframe', group='Higher Timeframe Levels')
+showMTFLevels = input.bool(title='Show Multiple Timeframe S/R Levels?', defval=true, group='Higher Timeframe Levels')
+
+// Colors for S/R levels
+oneColorS = input.color(color.new(color.orange, 50), title='1st Timeframe Support', group='Higher Timeframe Levels', inline='MTF1')
+oneColorR = input.color(color.new(color.orange, 50), title='Resistance', group='Higher Timeframe Levels', inline='MTF1')
+twoColorS = input.color(color.new(color.blue, 50), title='2nd Timeframe Support', group='Higher Timeframe Levels', inline='MTF2')
+twoColorR = input.color(color.new(color.blue, 50), title='Resistance', group='Higher Timeframe Levels', inline='MTF2')
+threeColorS = input.color(color.new(color.white, 50), title='3rd Timeframe Support', group='Higher Timeframe Levels', inline='MTF3')
+threeColorR = input.color(color.new(color.white, 50), title='Resistance', group='Higher Timeframe Levels', inline='MTF3')
+fourColorS = input.color(color.new(color.red, 50), title='4th Timeframe Support', group='Higher Timeframe Levels', inline='MTF4')
+fourColorR = input.color(color.new(color.red, 50), title='Resistance', group='Higher Timeframe Levels', inline='MTF4')
+levelWidth = input.int(defval=1, title='Line Width (pixels)', group='Higher Timeframe Levels')
+
+// Auto Trading Settings
+enable_auto_trading = input.bool(false, "Enable Auto Trading Alerts", group="Auto Trading", tooltip="Enable to generate webhook alerts for automated trading")
+webhook_enabled = input.bool(false, "Enable Webhook Alerts", group="Auto Trading", tooltip="Enable to send trade signals via webhook")
+webhook_url = input.string("", "Webhook URL", group="Auto Trading", tooltip="Enter your webhook URL from your broker or trading service")
+trade_comment = input.string("BB-MS-Trade", "Trade Comment", group="Auto Trading", tooltip="Comment to identify trades placed by this indicator")
+// Telegram Notification Settings
+telegram_enabled = input.bool(false, "Enable Telegram Notifications", group="Telegram Notifications", tooltip="Enable to send notifications to Telegram")
+send_sl_tp_notifications = input.bool(true, "Send SL/TP Hit Notifications", group="Telegram Notifications", tooltip="Send notifications when stop loss or take profit is hit")
+
+// Star Rating Parameters
+show_star_rating = input.bool(true, "Show Star Rating", group="Star Rating")
+min_stars_for_notification = input.int(5, "Minimum Stars for Notification", minval=1, maxval=5, group="Star Rating")
+rr_5star = input.float(3.0, "5-Star R:R Threshold", minval=1.0, group="Star Rating")
+rr_4star = input.float(2.0, "4-Star R:R Threshold", minval=1.0, group="Star Rating")
+tf_alignment_weight = input.float(1.0, "Timeframe Alignment Weight", minval=0.1, maxval=2.0, group="Star Rating")
+pattern_quality_weight = input.float(1.0, "Pattern Quality Weight", minval=0.1, maxval=2.0, group="Star Rating")
+volatility_weight = input.float(1.0, "Volatility Condition Weight", minval=0.1, maxval=2.0, group="Star Rating")
+
+// Stop Loss Buffer Settings
+use_sl_buffer = input.bool(true, "Use Stop Loss Buffer", group="Stop Loss Settings")
+sl_buffer_percentage = input.float(0.2, "Stop Loss Buffer (%)", minval=0.0, maxval=5.0, step=0.1, group="Stop Loss Settings", tooltip="Percentage buffer to add to stop loss for additional safety")
+
+// Pullback Depth Analysis Settings
+use_depth_analysis = input.bool(false, "Use Pullback Depth Analysis", group="Depth Analysis", tooltip="When enabled, signals require minimum pullback depth")
+pullback_tf_selection = input.string("First", "Pullback Analysis Timeframe", options=["First", "Second", "Third", "Fourth"], group="Depth Analysis")
+min_pullback_depth = input.float(0.382, "Minimum Pullback Depth", minval=0.1, maxval=1.0, step=0.001, group="Depth Analysis", tooltip="Minimum Fibonacci retracement required (0.382 = 38.2%)")
+show_fib_levels = input.bool(false, "Show Fibonacci Levels", group="Depth Analysis")
+min_star_rating = input.float(3.0, "Minimum Star Rating", minval=1.0, maxval=5.0, step=0.5, group="Depth Analysis", tooltip="Minimum star rating required for signals")
+
+// VWAP Integration Settings
+use_vwap_analysis = input.bool(false, "Enable Anchored VWAP Analysis", group="VWAP Settings")
+vwap_proximity_threshold = input.float(0.2, "VWAP Proximity Threshold (%)", minval=0.1, maxval=1.0, step=0.1, group="VWAP Settings")
+vwap_weight = input.float(1.0, "VWAP Alignment Weight", minval=0.1, maxval=2.0, step=0.1, group="VWAP Settings")
+
+// Table Visibility Settings
+show_trend_table = input.bool(true, "Show Trend Table", group="Table Visibility")
+show_star_rating_table = input.bool(true, "Show Star Rating Table", group="Table Visibility")
+show_risk_table = input.bool(true, "Show Risk Management Table", group="Table Visibility")
+show_telegram_table = input.bool(true, "Show Telegram Table", group="Table Visibility")
+show_debug_table = input.bool(true, "Show Debug Table", group="Table Visibility")
+show_scoring_table = input.bool(true, "Show Scoring Table", group="Table Visibility")
+
+// Session and time-related variables
+// Define and count new sessions
+newSession = timeframe.isdwm ? false : session.isfirstbar
+var sessionCount = 0
+
+// Market Hours Settings (from Anchored VWAP)
+mktHrs = input.session("0930-1600", "Start / End Time", tooltip = "A 24 hour format, where 0930 is 9:30 AM, 1600 is 4:00 PM, etc.", group="Market Hours")
+timezone = input.string("America/New_York", "Time Zone", group="Market Hours")
+minutesInDay = "1440"
+marketHours = not na(time(minutesInDay, mktHrs, timezone))
+
+// Anchor Reset Settings
+sessionLimited = input.bool(true, "Limit anchor session continuation", "Defines when a given anchor should be reset if its VWAP has not been broken, measured in sessions.", group="VWAP Settings")
+anchorMax = input.int(1, "Maximum sessions before reset", 1, group="VWAP Settings")
+mktHrsOnly = input.bool(false, "Limit anchor resets to Regular Trading Hours", "Prevents a given VWAP from resetting after hours, overnight, or during the premarket.", group="VWAP Settings")
+
+// VWAP Source Settings
+hiAvg = input.string("high", "High Anchor Source", ["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"], group="VWAP Settings")
+loAvg = input.string("low", "Low Anchor Source", ["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"], group="VWAP Settings")
+
+// Function to get price based on selected source
+price(source) =>
+    switch source
+        "open" => open
+        "high" => high
+        "low" => low
+        "close" => close
+        "hl2" => hl2
+        "hlc3" => hlc3
+        "ohlc4" => ohlc4
+        => hlc3  // default
+
+// Add ATR for dynamic pattern sizing
+atr = ta.atr(14)
+
+// Determine if candle is bullish or bearish
+is_bullish = close > open
+is_bearish = close < open
+
+// ===== RISK MANAGEMENT FUNCTIONS =====
+// Function to calculate position size - simplified direct approach
+f_calculatePositionSize(isLong, entryPrice, stopPrice) =>
+    // If fixed lot size is enabled, just return that value
+    if fixed_lot_size
+        [lot_size_value, "lots"]
+    else
+        // Calculate risk amount in account currency
+        riskAmount = account_capital * risk_percentage / 100
+        
+        // Calculate position size based on instrument type
+        if instrument_type == "Forex"
+            // Calculate stop loss in price points
+            stopLossPoints = math.abs(entryPrice - stopPrice)
+            
+            // Ensure stopLossPoints is not zero to avoid division by zero
+            stopLossPoints := math.max(stopLossPoints, 0.0001)
+            
+            // Get symbol information
+            symbol = syminfo.ticker
+            
+            // Simplified direct calculation for Gold (XAUUSD)
+            if str.contains(symbol, "XAU") or str.contains(symbol, "GOLD")
+                // For Gold: 1 lot = 100 oz, $1 move = $100 per lot
+                // Calculate lot size based on risk amount and stop loss in dollars
+                riskPerPoint = riskAmount / stopLossPoints
+                lotSize = riskPerPoint / 100  // $100 per $1 move per lot
+                
+                // Round to nearest 0.01 lot
+                lotSize := math.round(lotSize * 100) / 100
+                
+                // Apply minimum lot size
+                lotSize := math.max(lotSize, 0.01)
+                
+                [lotSize, "lots"]
+            
+            // For other forex pairs
+            else
+                // For regular forex: calculate based on pip value
+                // Determine pip size
+                pipSize = str.contains(symbol, "JPY") ? 0.01 : 0.0001
+                
+                // Convert stop loss to pips
+                stopLossPips = stopLossPoints / pipSize
+                
+                // Standard pip value calculation (simplified)
+                // For a standard lot (100,000 units):
+                // - USD/XXX pairs: 10 USD per pip
+                // - XXX/USD pairs: 10 USD per pip
+                pipValue = 10.0  // Default $10 per pip per standard lot
+                
+                // Calculate lot size
+                lotSize = riskAmount / (stopLossPips * pipValue)
+                
+                // Round to nearest 0.01 lot
+                lotSize := math.round(lotSize * 100) / 100
+                
+                // Apply minimum lot size
+                lotSize := math.max(lotSize, 0.01)
+                
+                [lotSize, "lots"]
+        else
+            // For stocks, calculate number of shares
+            shares = riskAmount / math.abs(entryPrice - stopPrice)
+            
+            // Round down to whole shares
+            shares := math.floor(shares)
+            
+            // Ensure at least 1 share
+            shares := math.max(shares, 1)
+            
+            [shares, "shares"]
+
+
+// Variables to store pullback information
+var float currentPullbackDepth = 0.0
+var bool pullbackMeetsMinimum = false
+
+// Variables to store signal scores
+var float lastBuyPatternScore = 0.0
+var float lastBuyAlignmentScore = 0.0
+var float lastBuyDepthScore = 0.0
+var float lastBuyRRScore = 0.0
+var float lastBuyStarRating = 0.0
+
+var float lastSellPatternScore = 0.0
+var float lastSellAlignmentScore = 0.0
+var float lastSellDepthScore = 0.0
+var float lastSellRRScore = 0.0
+var float lastSellStarRating = 0.0
+
+var string lastBuyPatternType = na
+var string lastSellPatternType = na
+
+// ===== MARKET STRUCTURE DETECTION =====
+// Function to detect market structure on higher timeframes
+f_getHTF() =>
+    var float ph = na, float pl = na, float highLevel = na, float lowLevel = na
+    if pivotType == "Close"
+        ph := ta.pivothigh(close, ms_lookback, ms_lookback)
+        pl := ta.pivotlow(close, ms_lookback, ms_lookback)
+        highLevel := ta.valuewhen(not na(ph), close[ms_lookback], 0)
+        lowLevel := ta.valuewhen(not na(pl), close[ms_lookback], 0)
+    else 
+        ph := ta.pivothigh(high, ms_lookback, ms_lookback)
+        pl := ta.pivotlow(low, ms_lookback, ms_lookback)
+        highLevel := ta.valuewhen(not na(ph), high[ms_lookback], 0)
+        lowLevel := ta.valuewhen(not na(pl), low[ms_lookback], 0)
+    barsSinceHigh = ta.barssince(ph) + ms_lookback
+    barsSinceLow = ta.barssince(pl) + ms_lookback
+    timeSinceHigh = time[barsSinceHigh]
+    timeSinceLow = time[barsSinceLow]
+    [ph, pl, highLevel, lowLevel, barsSinceHigh, barsSinceLow, timeSinceHigh, timeSinceLow]
+
+// Get market structure for each timeframe
+//[ph_01, pl_01, hL_01, lL_01, bsSH_01, bsSL_01, tSH_01, tSL_01] = request.security(syminfo.tickerid, oneSet, f_getHTF())
+//[ph_02, pl_02, hL_02, lL_02, bsSH_02, bsSL_02, tSH_02, tSL_02] = request.security(syminfo.tickerid, twoSet, f_getHTF())
+//[ph_03, pl_03, hL_03, lL_03, bsSH_03, bsSL_03, tSH_03, tSL_03] = request.security(syminfo.tickerid, threeSet, f_getHTF())
+//[ph_04, pl_04, hL_04, lL_04, bsSH_04, bsSL_04, tSH_04, tSL_04] = request.security(syminfo.tickerid, fourSet, f_getHTF())
+
+// ===== DYNAMIC MARKET STRUCTURE DETECTION =====
+// Function to detect and update market structure on higher timeframes
+f_getDynamicHTF() =>
+    // Use standard pivot detection for reliable swing points
+    float ph = pivotType == "Close" ? ta.pivothigh(close, ms_lookback, ms_lookback) : ta.pivothigh(high, ms_lookback, ms_lookback)
+    float pl = pivotType == "Close" ? ta.pivotlow(close, ms_lookback, ms_lookback) : ta.pivotlow(low, ms_lookback, ms_lookback)
+    
+    // Get the actual high and low levels
+    float highLevel = na
+    float lowLevel = na
+    
+    if not na(ph)
+        highLevel := pivotType == "Close" ? close[ms_lookback] : high[ms_lookback]
+    
+    if not na(pl)
+        lowLevel := pivotType == "Close" ? close[ms_lookback] : low[ms_lookback]
+    
+    // If we don't have both high and low levels, use recent price action
+    if na(highLevel) or na(lowLevel)
+        highLevel := ta.highest(high, 20)
+        lowLevel := ta.lowest(low, 20)
+    
+    // Determine trend based on recent price action
+    bool inConfirmedUptrend = close > (highLevel + lowLevel) / 2
+    
+    // Calculate bars since high/low for compatibility
+    int barsSinceHigh = na
+    int barsSinceLow = na
+    int timeSinceHigh = na
+    int timeSinceLow = na
+    
+    if not na(ph)
+        barsSinceHigh := ta.barssince(ph) + ms_lookback
+        barsSinceHigh := math.min(barsSinceHigh, 9999)  // Safety limit
+        timeSinceHigh := barsSinceHigh < 9999 ? time[barsSinceHigh] : time[9999]
+    else
+        barsSinceHigh := 10
+        timeSinceHigh := time[10]
+    
+    if not na(pl)
+        barsSinceLow := ta.barssince(pl) + ms_lookback
+        barsSinceLow := math.min(barsSinceLow, 9999)  // Safety limit
+        timeSinceLow := barsSinceLow < 9999 ? time[barsSinceLow] : time[9999]
+    else
+        barsSinceLow := 10
+        timeSinceLow := time[10]
+    
+    // Return all the values that the original function returned
+    [ph, pl, highLevel, lowLevel, barsSinceHigh, barsSinceLow, timeSinceHigh, timeSinceLow, inConfirmedUptrend]
+    
+// Get dynamic market structure for each timeframe
+[ph_01, pl_01, hL_01, lL_01, bsSH_01, bsSL_01, tSH_01, tSL_01, uptrend_01] = request.security(syminfo.tickerid, oneSet, f_getDynamicHTF())
+[ph_02, pl_02, hL_02, lL_02, bsSH_02, bsSL_02, tSH_02, tSL_02, uptrend_02] = request.security(syminfo.tickerid, twoSet, f_getDynamicHTF())
+[ph_03, pl_03, hL_03, lL_03, bsSH_03, bsSL_03, tSH_03, tSL_03, uptrend_03] = request.security(syminfo.tickerid, threeSet, f_getDynamicHTF())
+[ph_04, pl_04, hL_04, lL_04, bsSH_04, bsSL_04, tSH_04, tSL_04, uptrend_04] = request.security(syminfo.tickerid, fourSet, f_getDynamicHTF())
+
+// Check timeframe validity
+tfInMinutes(simple string tf = "") =>
+    float chartTf =
+      timeframe.multiplier * (
+      timeframe.isseconds ? 1. / 60             :
+      timeframe.isminutes ? 1.                  :
+      timeframe.isdaily   ? 60. * 24            :
+      timeframe.isweekly  ? 60. * 24 * 7        :
+      timeframe.ismonthly ? 60. * 24 * 30.4375  : na)
+    float result = tf == "" ? chartTf : request.security(syminfo.tickerid, tf, chartTf)
+    
+float chartTFInMinutes = tfInMinutes()
+bool TF1Check = tfInMinutes(oneSet) < chartTFInMinutes
+bool TF2Check = tfInMinutes(twoSet) < chartTFInMinutes
+bool TF3Check = tfInMinutes(threeSet) < chartTFInMinutes
+bool TF4Check = tfInMinutes(fourSet) < chartTFInMinutes
+
+// Current timeframe pivots
+var float phC = na, float plC = na
+if pivotType == "High/Low"
+    phC := ta.pivothigh(high, ms_lookback, ms_lookback)
+    plC := ta.pivotlow(low, ms_lookback, ms_lookback)
+else
+    phC := ta.pivothigh(close, ms_lookback, ms_lookback)
+    plC := ta.pivotlow(close, ms_lookback, ms_lookback)
+
+// Plot historical pivot points
+plot(showPivotPoints ? phC : na, style=plot.style_cross, linewidth=3, color=color.new(color.yellow, 50), offset=-ms_lookback)
+plot(showPivotPoints ? plC : na, style=plot.style_cross, linewidth=3, color=color.new(color.yellow, 50), offset=-ms_lookback)
+
+// ===== PLOT SUPPORT/RESISTANCE LINES =====
+f_line(x1, y1, y2, _color) =>
+    var line id = na
+    line.delete(id)
+    id := line.new(x1, y1, time, y2, xloc.bar_time, extend.right, _color, width=levelWidth)
+    id
+
+// Draw S/R lines for each timeframe
+highLine1 = TF1Check ? na : showMTFLevels ? f_line(tSH_01, hL_01, hL_01, oneColorR) : na
+lowLine1 = TF1Check ? na : showMTFLevels ? f_line(tSL_01, lL_01, lL_01, oneColorS) : na
+highLine2 = TF2Check ? na : showMTFLevels ? f_line(tSH_02, hL_02, hL_02, twoColorR) : na
+lowLine2 = TF2Check ? na : showMTFLevels ? f_line(tSL_02, lL_02, lL_02, twoColorS) : na
+highLine3 = TF3Check ? na : showMTFLevels ? f_line(tSH_03, hL_03, hL_03, threeColorR) : na
+lowLine3 = TF3Check ? na : showMTFLevels ? f_line(tSL_03, lL_03, lL_03, threeColorS) : na
+highLine4 = TF4Check ? na : showMTFLevels ? f_line(tSH_04, hL_04, hL_04, fourColorR) : na
+lowLine4 = TF4Check ? na : showMTFLevels ? f_line(tSL_04, lL_04, lL_04, fourColorS) : na
+
+// ===== TREND CALCULATIONS =====
+f_signal(highLevel, lowLevel) =>
+    uptrendSignal = high > highLevel
+    downtrendSignal = low < lowLevel
+    inUptrend = bool(na)
+    inDowntrend = bool(na)
+    inUptrend := uptrendSignal[1] ? true : downtrendSignal[1] ? false : inUptrend[1]
+    inDowntrend := not inUptrend
+    [uptrendSignal, downtrendSignal, inUptrend, inDowntrend]
+
+[uptrendSignal1, downtrendSignal1, inUptrend1, inDowntrend1] = f_signal(hL_01, lL_01)
+[uptrendSignal2, downtrendSignal2, inUptrend2, inDowntrend2] = f_signal(hL_02, lL_02)
+[uptrendSignal3, downtrendSignal3, inUptrend3, inDowntrend3] = f_signal(hL_03, lL_03)
+[uptrendSignal4, downtrendSignal4, inUptrend4, inDowntrend4] = f_signal(hL_04, lL_04)
+
+// ===== TREND TABLE =====
+tablePos = tableLocation == 'Top' ? position.top_right : position.bottom_right
+var table trendTable = table.new(tablePos, 4, 1, border_width=3)
+upColor = color.rgb(38, 166, 154)
+downColor = color.rgb(240, 83, 80)
+tfColor = color.new(#999999, 0)
+
+f_fillCell(_column, _row, _cellText, _c_color) =>
+    table.cell(trendTable, _column, _row, _cellText, bgcolor=color.new(_c_color, 70), text_color=_c_color, width=6)
+    
+// Define glyphs
+glyph1 = TF1Check ? na : inUptrend1 ? '▲ ': '▼ ' 
+glyph2 = TF2Check ? na : inUptrend2 ? '▲ ': '▼ ' 
+glyph3 = TF3Check ? na : inUptrend3 ? '▲ ': '▼ '
+glyph4 = TF4Check ? na : inUptrend4 ? '▲ ': '▼ ' 
+
+if barstate.islast
+    f_fillCell(0, 0, glyph1 + oneSet, TF1Check ? tfColor : inUptrend1 ? upColor : downColor)
+    f_fillCell(1, 0, glyph2 + twoSet, TF2Check ? tfColor : inUptrend2 ? upColor : downColor)
+    f_fillCell(2, 0, glyph3 + threeSet, TF3Check ? na : inUptrend3 ? upColor : downColor)
+    f_fillCell(3, 0, glyph4 + fourSet, TF4Check ? na : inUptrend4 ? upColor : downColor)
+
+// ===== MODIFIED PULLBACK DEPTH CALCULATION =====
+// Select the appropriate timeframe data based on user selection
+float highLevel = na
+float lowLevel = na
+bool tfUptrend = false
+
+if pullback_tf_selection == "First"
+    highLevel := hL_01
+    lowLevel := lL_01
+    tfUptrend := inUptrend1
+else if pullback_tf_selection == "Second"
+    highLevel := hL_02
+    lowLevel := lL_02
+    tfUptrend := inUptrend2
+else if pullback_tf_selection == "Third"
+    highLevel := hL_03
+    lowLevel := lL_03
+    tfUptrend := inUptrend3
+else // Fourth
+    highLevel := hL_04
+    lowLevel := lL_04
+    tfUptrend := inUptrend4
+
+// Get the current price from the current timeframe
+htf_close = close
+
+// Calculate current pullback depth using market structure levels
+if not na(highLevel) and not na(lowLevel) and highLevel != lowLevel  // Added check to prevent division by zero
+    // Calculate the price range
+    priceRange = math.abs(highLevel - lowLevel)
+    
+    // Add safety check for minimum price range to avoid extreme values
+    if priceRange > 0 and priceRange > (syminfo.mintick * 10)  // Ensure range is meaningful
+        if tfUptrend
+            // In uptrend: measure retracement from high to current price
+            // Ensure the calculation is bounded between 0 and 1
+            pullbackAmount = math.max(0, math.min(highLevel - htf_close, priceRange))
+            currentPullbackDepth := pullbackAmount / priceRange
+        else
+            // In downtrend: measure retracement from current price to low
+            // Ensure the calculation is bounded between 0 and 1
+            pullbackAmount = math.max(0, math.min(htf_close - lowLevel, priceRange))
+            currentPullbackDepth := pullbackAmount / priceRange
+        
+        // Check if pullback meets minimum requirement
+        pullbackMeetsMinimum := currentPullbackDepth >= min_pullback_depth
+    else
+        currentPullbackDepth := 0.0
+        pullbackMeetsMinimum := false
+else
+    currentPullbackDepth := 0.0
+    pullbackMeetsMinimum := false
+
+// Draw Fibonacci levels when enabled
+if use_depth_analysis and show_fib_levels and barstate.islast and not na(highLevel) and not na(lowLevel)
+    var line[] fibLines = array.new_line()
+    
+    // Clear previous lines
+    if array.size(fibLines) > 0
+        for i = 0 to array.size(fibLines) - 1
+            line.delete(array.get(fibLines, i))
+        array.clear(fibLines)
+    
+    // Draw new lines
+    priceRange = math.abs(highLevel - lowLevel)
+    
+    // Convert time to bar index for line drawing
+    startBarIndex = bar_index - 50  // Start 50 bars back
+    
+    if tfUptrend
+        // Uptrend: Draw fibs from high to low (0% at high, 100% at low)
+        // 0% level (swing high)
+        level0 = highLevel
+        line0 = line.new(x1=startBarIndex, y1=level0, x2=bar_index, y2=level0, 
+                         color=color.new(color.white, 50), style=line.style_dashed, width=1, extend=extend.right)
+        array.push(fibLines, line0)
+        label.new(x=bar_index, y=level0, text="0%", color=color.new(color.white, 80), style=label.style_label_right, textcolor=color.white)
+        
+        // 38.2% level
+        level382 = highLevel - priceRange * 0.382
+        line382 = line.new(x1=startBarIndex, y1=level382, x2=bar_index, y2=level382, color=color.new(color.yellow, 50), style=line.style_dashed, width=1, extend=extend.right)
+        array.push(fibLines, line382)
+        label.new(x=bar_index, y=level382, text="38.2%", color=color.new(color.yellow, 80), style=label.style_label_right, textcolor=color.yellow)
+        
+        // 50% level
+        level50 = highLevel - priceRange * 0.5
+        line50 = line.new(x1=startBarIndex, y1=level50, x2=bar_index, y2=level50, color=color.new(color.orange, 50), style=line.style_dashed, width=1, extend=extend.right)
+        array.push(fibLines, line50)
+        label.new(x=bar_index, y=level50, text="50%", color=color.new(color.orange, 80), style=label.style_label_right, textcolor=color.orange)
+        
+        // 61.8% level
+        level618 = highLevel - priceRange * 0.618
+        line618 = line.new(x1=startBarIndex, y1=level618, x2=bar_index, y2=level618, 
+                          color=color.new(color.red, 50), style=line.style_dashed, width=1, extend=extend.right)
+        array.push(fibLines, line618)
+        label.new(x=bar_index, y=level618, text="61.8%", color=color.new(color.red, 80), style=label.style_label_right, textcolor=color.red)
+        
+        // 100% level (swing low)
+        level100 = lowLevel
+        line100 = line.new(x1=startBarIndex, y1=level100, x2=bar_index, y2=level100, color=color.new(color.white, 50), style=line.style_dashed, width=1, extend=extend.right)
+        array.push(fibLines, line100)
+        label.new(x=bar_index, y=level100, text="100%", color=color.new(color.white, 80), style=label.style_label_right, textcolor=color.white)
+    else
+        // Downtrend: Draw fibs from low to high (0% at low, 100% at high)
+        // 0% level (swing low)
+        level0 = lowLevel
+        line0 = line.new(x1=startBarIndex, y1=level0, x2=bar_index, y2=level0, 
+                         color=color.new(color.white, 50), style=line.style_dashed, width=1, extend=extend.right)
+        array.push(fibLines, line0)
+        label.new(x=bar_index, y=level0, text="0%", color=color.new(color.white, 80), style=label.style_label_right, textcolor=color.white)
+        
+        // 38.2% level
+        level382 = lowLevel + priceRange * 0.382
+        line382 = line.new(x1=startBarIndex, y1=level382, x2=bar_index, y2=level382, color=color.new(color.yellow, 50), style=line.style_dashed, width=1, extend=extend.right)
+        array.push(fibLines, line382)
+        label.new(x=bar_index, y=level382, text="38.2%", color=color.new(color.yellow, 80), style=label.style_label_right, textcolor=color.yellow)
+        
+        // 50% level
+        level50 = lowLevel + priceRange * 0.5
+        line50 = line.new(x1=startBarIndex, y1=level50, x2=bar_index, y2=level50, 
+                         color=color.new(color.orange, 50), style=line.style_dashed, width=1, extend=extend.right)
+        array.push(fibLines, line50)
+        label.new(x=bar_index, y=level50, text="50%", color=color.new(color.orange, 80), style=label.style_label_right, textcolor=color.orange)
+        
+        // 61.8% level
+        level618 = lowLevel + priceRange * 0.618
+        line618 = line.new(x1=startBarIndex, y1=level618, x2=bar_index, y2=level618, color=color.new(color.red, 50), style=line.style_dashed, width=1, extend=extend.right)
+        array.push(fibLines, line618)
+        label.new(x=bar_index, y=level618, text="61.8%", color=color.new(color.red, 80), style=label.style_label_right, textcolor=color.red)
+        
+        // 100% level (swing high)
+        level100 = highLevel
+        line100 = line.new(x1=startBarIndex, y1=level100, x2=bar_index, y2=level100, 
+                          color=color.new(color.white, 50), style=line.style_dashed, width=1, extend=extend.right)
+        array.push(fibLines, line100)
+        label.new(x=bar_index, y=level100, text="100%", color=color.new(color.white, 80), style=label.style_label_right, textcolor=color.white)
+
+// ===== BOLLINGER BANDS CALCULATION =====
+[middle, upper, lower] = ta.bb(close, bb_length, bb_mult)
+
+// Band Width Calculation (for volatility)
+band_width = (upper - lower) / middle
+band_width_ma = ta.sma(band_width, 20)
+band_squeeze = band_width < band_width_ma * 0.8  // Band width is 20% below its average
+
+// Check proximity to Bollinger Bands
+near_lower_band = low <= lower + (middle - lower) * band_proximity
+near_upper_band = high >= upper - (upper - middle) * band_proximity
+
+// ===== CANDLESTICK PATTERN DETECTION =====
+// Calculate candle properties
+body_size = math.abs(close - open)
+total_range = high - low
+upper_shadow = high - math.max(open, close)
+lower_shadow = math.min(open, close) - low
+body_mid = (open + close) / 2
+body_position = (body_mid - low) / total_range  // 0 = bottom, 1 = top
+
+// === BULLISH PATTERNS ===
+// Hammer pattern (bullish)
+is_hammer = is_bullish and lower_shadow > body_size * hammer_ratio and  upper_shadow < body_size * 0.7 and  body_position > 0.55 and  body_size > 0 and  lower_shadow > atr * 0.2 
+ 
+// Inverted hammer (bullish) 
+is_inverted_hammer = is_bullish and  upper_shadow > body_size * hammer_ratio and  lower_shadow < body_size * 0.7 and  body_position < 0.45 and  body_size > 0 and  upper_shadow > atr * 0.2 
+
+// Bullish engulfing 
+is_bullish_engulfing = close > open and  
+                      close[1] < open[1] and   
+                      close > open[1] and   
+                      (open <= close[1] or math.abs(open - close[1]) < atr * 0.1) and  
+                      (close - open) > (open[1] - close[1]) * 0.5 
+ 
+// Bullish rejection (long lower shadow) 
+is_bullish_rejection = is_bullish and  
+                      lower_shadow > body_size * rejection_ratio and  
+                      lower_shadow > atr * 0.2 and   
+                      body_position > 0.5 and  
+                      body_size > 0 
+
+// === BEARISH PATTERNS ===
+// Hanging man (bearish hammer) 
+is_hanging_man = is_bearish and  lower_shadow > body_size * hammer_ratio and  upper_shadow < body_size * 0.7 and  body_position > 0.55 and  body_size > 0 and  lower_shadow > atr * 0.2 
+ 
+// Shooting star (bearish) 
+is_shooting_star = is_bearish and  upper_shadow > body_size * hammer_ratio and  lower_shadow < body_size * 0.7 and  body_position < 0.45 and   body_size > 0 and  upper_shadow > atr * 0.2 
+ 
+// Bearish engulfing 
+is_bearish_engulfing = close < open and   close[1] > open[1] and  close < open[1] and   (open >= close[1] or math.abs(open - close[1]) < atr * 0.1) and  (open - close) > (close[1] - open[1]) * 0.5 
+ 
+// Bearish rejection (long upper shadow) 
+is_bearish_rejection = is_bearish and  
+                      upper_shadow > body_size * rejection_ratio and  
+                      upper_shadow > atr * 0.2 and  
+                      body_position < 0.5 and  
+                      body_size > 0 
+
+
+// Bullish pattern at lower Bollinger Band
+hammer_buy_signal = is_hammer and near_lower_band
+bullish_rejection_at_bb = is_bullish_rejection and low <= lower and close > lower
+inverted_hammer_buy_signal = is_inverted_hammer and near_lower_band
+bullish_engulfing_at_bb = is_bullish_engulfing and near_lower_band
+
+// Bearish pattern at upper Bollinger Band
+hanging_man_sell_signal = is_hanging_man and near_upper_band
+bearish_rejection_at_bb = is_bearish_rejection and high >= upper and close < upper
+shooting_star_sell_signal = is_shooting_star and near_upper_band
+bearish_engulfing_at_bb = is_bearish_engulfing and near_upper_band
+
+// ===== LONG STRATEGIES =====
+
+// 1. Bollinger Band Bounce (Long)
+// TRIGGER: Price touches or closes below lower band, then next candle closes inside bands
+bb_bounce_long_condition = close[1] < lower[1] and close > lower
+
+// 2. Double Bottom at Lower Band (Long)
+// Find two touches of the lower band within lookback period
+lower_band_touch = low <= lower
+var int last_lower_touch_bar = 0
+var float last_lower_touch_price = 0.0
+
+if (lower_band_touch)
+    last_lower_touch_price := low
+    last_lower_touch_bar := bar_index
+
+// TRIGGER: Second touch forms a higher low (less downside momentum)
+double_bottom_long_condition = lower_band_touch and bar_index - last_lower_touch_bar <= lookback and bar_index != last_lower_touch_bar and low > last_lower_touch_price and close > open  // Bullish candle on second touch
+
+// 4. Band Width Squeeze followed by Expansion (Long)
+// TRIGGER: Bands were squeezed, price was near lower band, now bands expanding and price moving up
+band_expanding = ta.change(band_width, 3) > 0  // Band width increasing over last 3 bars
+squeeze_expansion_long_condition = band_squeeze[3] and low[3] <= lower[3] * 1.01 and band_expanding and close > open  // Current candle is bullish
+
+// 5. Middle Band Magnet (Long)
+// TRIGGER: Price touched lower band within last 3 bars and is now moving toward middle band
+middle_band_magnet_long_condition = ta.lowest(low, 3) <= lower[1] and close > close[1] and close < middle and ta.change(close - lower, 1) > 0  // Moving away from lower band
+
+// ===== SHORT STRATEGIES =====
+
+// 1. Upper Band Rejection (Short)
+// TRIGGER: Price touches or closes above upper band, then next candle closes inside bands
+bb_bounce_short_condition = close[1] > upper[1] and close < upper
+
+// 2. Double Top at Upper Band (Short)
+// Find two touches of the upper band within lookback period
+upper_band_touch = high >= upper
+var int last_upper_touch_bar = 0
+var float last_upper_touch_price = 0.0
+
+if (upper_band_touch)
+    last_upper_touch_price := high
+    last_upper_touch_bar := bar_index
+
+// TRIGGER: Second touch forms a lower high (less upside momentum)
+double_top_short_condition = upper_band_touch and bar_index - last_upper_touch_bar <= lookback and bar_index != last_upper_touch_bar and high < last_upper_touch_price and close < open  // Bearish candle on second touch
+
+// 4. Band Width Contraction at Upper Band (Short)
+// TRIGGER: Price at upper band while bands are contracting
+band_contracting = ta.change(band_width, 3) < 0  // Band width decreasing over last 3 bars
+band_contraction_short_condition = high >= upper * 0.99 and band_contracting and close < open  // Current candle is bearish
+
+// 5. M-Top with Band Touch (Short)
+// TRIGGER: M pattern with second top at upper band showing less momentum
+var float first_top = 0.0
+var int first_top_bar = 0
+var bool potential_m_top = false
+
+if (ta.pivothigh(high, 2, 2))
+    if (first_top == 0.0 or bar_index - first_top_bar > lookback)
+        first_top := high[2]
+        first_top_bar := bar_index - 2
+        potential_m_top := false
+    else
+        potential_m_top := true
+
+m_top_short_condition = potential_m_top and high[2] < first_top and high[2] >= upper[2] * 0.99 and close < open  // Current candle is bearish
+
+
+// Anchored VWAP Variables
+// Define high and low variables properly
+h = high  // Declare h as high
+l = low   // Declare l as low
+o = open  // Declare o as open
+c = close // Declare c as close
+
+// Define candle patterns and parts
+candleBody = math.abs(c - o)
+rising = c > o
+falling = o > c
+upWick = rising ? h - c : h - o
+dnWick = falling ? c - l : o - l
+doji = (upWick >= candleBody or dnWick >= candleBody) and (h != o and h != c and l != o and l != c)
+
+// Initialize variables
+var hi = h, var lo = l, var anchoredHi = h, var anchoredLo = l
+var hiSessionCount = 0, var loSessionCount = 0
+var resetHiAnchor = false, var resetLoAnchor = false
+
+// Logic for what qualifies as "breaking" the previous anchors
+breakingHigher = rising and (c > hi or (c[1] > anchoredHi and c > h[1] and o > anchoredHi and not doji))
+breakingLower = falling and (c < lo or (c[1] < anchoredLo and c < l[1] and o < anchoredLo and not doji))
+
+// Logic for when to reset anchors
+if newSession and sessionLimited
+    hiSessionCount += 1, loSessionCount += 1
+    if hiSessionCount == anchorMax
+        hiSessionCount := 0
+        hi := h
+        resetHiAnchor := true
+    if loSessionCount == anchorMax
+        loSessionCount := 0
+        lo := l
+        resetLoAnchor := true
+else if breakingHigher and (not mktHrsOnly or (marketHours and marketHours))
+    hiSessionCount := 0
+    hi := h
+    resetHiAnchor := true
+else if breakingLower and (not mktHrsOnly or (marketHours and marketHours))
+    loSessionCount := 0
+    lo := l
+    resetLoAnchor := true
+else
+    resetHiAnchor := false
+    resetLoAnchor := false
+
+// Set the Anchored VWAPs and their average
+anchoredHi := ta.vwap(price(hiAvg), resetHiAnchor)
+anchoredLo := ta.vwap(price(loAvg), resetLoAnchor)
+anchoredMean = (anchoredLo + anchoredHi) / 2
+
+// Function to calculate proximity between price levels
+calculateVWAPProximity(price1, price2) =>
+    percentDiff = math.abs(price1 - price2) / price1 * 100
+    percentDiff <= vwap_proximity_threshold
+
+// Function to check VWAP alignment for long signals
+checkLongVWAPAlignment() =>
+    if not use_vwap_analysis
+        true
+    else
+        // Check proximity between lower BB and Low/Average anchored VWAP
+        lowBBProximity = calculateVWAPProximity(lower, anchoredLo)
+        avgBBProximity = calculateVWAPProximity(lower, anchoredMean)
+        lowBBProximity or avgBBProximity
+
+// Function to check VWAP alignment for short signals
+checkShortVWAPAlignment() =>
+    if not use_vwap_analysis
+        true
+    else
+        // Check proximity between upper BB and High/Average anchored VWAP
+        highBBProximity = calculateVWAPProximity(upper, anchoredHi)
+        avgBBProximity = calculateVWAPProximity(upper, anchoredMean)
+        highBBProximity or avgBBProximity
+
+// Function to check VWAP alignment for long signals
+checkdepthanalysis() =>
+    if not use_depth_analysis
+        true
+    else
+        // Check proximity between lower BB and Low/Average anchored VWAP
+        pullbackMeetsMinimum
+
+// ===== COMBINED SIGNALS WITH MARKET STRUCTURE =====
+// Only take long signals when TF1 is bullish AND (depth analysis is disabled OR pullback meets minimum)
+bb_bounce_long_filtered = bb_bounce_long_condition and inUptrend1 and checkdepthanalysis() and checkLongVWAPAlignment()
+double_bottom_long_filtered = double_bottom_long_condition and inUptrend1 and checkdepthanalysis() and checkLongVWAPAlignment()
+squeeze_expansion_long_filtered = squeeze_expansion_long_condition and inUptrend1 and checkdepthanalysis() and checkLongVWAPAlignment()
+middle_band_magnet_long_filtered = middle_band_magnet_long_condition and inUptrend1 and checkdepthanalysis() and checkLongVWAPAlignment()
+hammer_buy_filtered = hammer_buy_signal and inUptrend1 and checkdepthanalysis() and checkLongVWAPAlignment()
+bullish_rejection_filtered = bullish_rejection_at_bb and inUptrend1 and checkdepthanalysis() and checkLongVWAPAlignment()
+inverted_hammer_buy_filtered = inverted_hammer_buy_signal and inUptrend1 and checkdepthanalysis() and checkLongVWAPAlignment()
+bullish_engulfing_filtered = bullish_engulfing_at_bb and inUptrend1 and checkdepthanalysis() and checkLongVWAPAlignment()
+
+// Only take short signals when TF1 is bearish AND (depth analysis is disabled OR pullback meets minimum)
+bb_bounce_short_filtered = bb_bounce_short_condition and inDowntrend1 and not inUptrend1 and checkdepthanalysis() and checkShortVWAPAlignment()
+double_top_short_filtered = double_top_short_condition and inDowntrend1 and not inUptrend1 and checkdepthanalysis() and checkShortVWAPAlignment()
+band_contraction_short_filtered = band_contraction_short_condition and inDowntrend1 and not inUptrend1 and checkdepthanalysis() and checkShortVWAPAlignment()
+m_top_short_filtered = m_top_short_condition and inDowntrend1 and not inUptrend1 and checkdepthanalysis() and checkShortVWAPAlignment()
+hanging_man_sell_filtered = hanging_man_sell_signal and inDowntrend1 and not inUptrend1 and checkdepthanalysis() and checkShortVWAPAlignment()
+bearish_rejection_filtered = bearish_rejection_at_bb and inDowntrend1 and not inUptrend1 and checkdepthanalysis() and checkShortVWAPAlignment()
+shooting_star_sell_filtered = shooting_star_sell_signal and inDowntrend1 and not inUptrend1 and checkdepthanalysis() and checkShortVWAPAlignment()
+bearish_engulfing_filtered = bearish_engulfing_at_bb and inDowntrend1 and not inUptrend1 and checkdepthanalysis() and checkShortVWAPAlignment()
+
+
+// Function to apply buffer to stop loss
+applyStopLossBuffer(isLong, entryPrice, rawStopPrice) =>
+    if not use_sl_buffer
+        rawStopPrice
+    else
+        bufferAmount = entryPrice * sl_buffer_percentage / 100
+        if isLong
+            // For long trades, move stop loss lower by buffer amount
+            rawStopPrice - bufferAmount
+        else
+            // For short trades, move stop loss higher by buffer amount
+            rawStopPrice + bufferAmount
+
+// Function to detect and score patterns
+detectPatternQuality(isLong) =>
+    float patternScore = 0.0
+    string patternType = na
+    bool hasPattern = false
+    
+    if isLong
+        // For long patterns
+        if is_hammer and near_lower_band
+            patternScore := 1.0
+            patternType := "Hammer"
+            hasPattern := true
+        else if is_inverted_hammer and near_lower_band
+            patternScore := 0.8
+            patternType := "Inverted Hammer"
+            hasPattern := true
+        else if bullish_rejection_at_bb
+            patternScore := 0.8
+            patternType := "Bullish Rejection"
+            hasPattern := true
+        else if bullish_engulfing_at_bb
+            patternScore := 0.9
+            patternType := "Bullish Engulfing"
+            hasPattern := true
+        else if bb_bounce_long_condition
+            patternScore := 0.7
+            patternType := "BB Bounce"
+            hasPattern := true
+        else if double_bottom_long_condition
+            patternScore := 0.9
+            patternType := "Double Bottom"
+            hasPattern := true
+    else
+        // For short patterns
+        if is_hanging_man and near_upper_band
+            patternScore := 1.0
+            patternType := "Hanging Man"
+            hasPattern := true
+        else if is_shooting_star and near_upper_band
+            patternScore := 0.8
+            patternType := "Shooting Star"
+            hasPattern := true
+        else if bearish_rejection_at_bb
+            patternScore := 0.8
+            patternType := "Bearish Rejection"
+            hasPattern := true
+        else if bearish_engulfing_at_bb
+            patternScore := 0.9
+            patternType := "Bearish Engulfing"
+            hasPattern := true
+        else if bb_bounce_short_condition
+            patternScore := 0.7
+            patternType := "BB Bounce"
+            hasPattern := true
+        else if double_top_short_condition
+            patternScore := 0.9
+            patternType := "Double Top"
+            hasPattern := true
+        else if band_contraction_short_condition
+            patternScore := 0.7
+            patternType := "Band Contraction"
+            hasPattern := true
+        else if m_top_short_condition
+            patternScore := 0.8
+            patternType := "M-Top"
+            hasPattern := true
+    
+    [patternScore, patternType, hasPattern]
+
+var bool hasVWAPAlignment = false
+
+calculateStarRating(isLong, rr_ratio) =>
+    // Initialize variables
+    float rating = 0.0
+    string rating_reason = ""
+    bool has_tf_alignment = false
+    bool has_good_rr = false
+    //bool has_pattern_quality = false
+    bool has_deep_pullback = false
+    
+    // Check timeframe alignment
+    tf_alignment = 0.0
+    if isLong
+        tf_alignment := (inUptrend1 ? 1.0 : 0.0) + (inUptrend2 ? 1.0 : 0.0) + (inUptrend3 ? 1.0 : 0.0) + (inUptrend4 ? 1.0 : 0.0)
+    else
+        tf_alignment := (inDowntrend1 ? 1.0 : 0.0) + (inDowntrend2 ? 1.0 : 0.0) + (inDowntrend3 ? 1.0 : 0.0) + (inDowntrend4 ? 1.0 : 0.0)
+    
+    // TF alignment requirement (at least 1 timeframe aligned)
+    has_tf_alignment := tf_alignment >= 1.0
+    if has_tf_alignment
+        rating := rating + 1.0
+        rating_reason := rating_reason + "✓ Timeframe alignment\n"
+        if tf_alignment >= 2
+            rating_reason := rating_reason + "  (alignment across two timeframes)\n"
+        if tf_alignment >= 3
+            rating_reason := rating_reason + "  (Strong alignment across multiple timeframes)\n"
+    
+    // Risk/Reward requirement - Modified to give partial credit for 1:1 to 2:1 ratios
+    if rr_ratio >= 1.0  // Minimum 1:1 required
+        if rr_ratio >= rr_4star  // 2.0 or higher
+            rating := rating + 1.0
+            rating_reason := rating_reason + "✓ Excellent risk/reward (" + str.tostring(rr_ratio, "#.##") + ")\n"
+            has_good_rr := true
+        else  // Between 1.0 and 2.0
+            rating := rating + 0.5
+            rating_reason := rating_reason + "✓ Acceptable risk/reward (" + str.tostring(rr_ratio, "#.##") + ")\n"
+            has_good_rr := true
+    else if rr_ratio == 0.0 or rr_ratio < 0.01
+        // Special case for zero or near-zero R:R (likely calculation error)
+        rating_reason := rating_reason + "⚠️ Risk/reward calculation error (0.0)\n"
+        // CRITICAL: Allow the signal to proceed even with R:R of 0 if other conditions are met
+        has_good_rr := true
+    else
+        has_good_rr := false
+        rating_reason := rating_reason + "❌ Risk/reward too low (" + str.tostring(rr_ratio, "#.##") + ")\n"
+    
+    // Pattern quality requirement - Use the new function
+    [pattern_quality, pattern_type, has_pattern_quality] = detectPatternQuality(isLong)
+    
+    if has_pattern_quality
+        rating := rating + 2.0
+        rating_reason := rating_reason + "✓ " + pattern_type + " pattern\n"
+    
+    // CRITICAL CHANGE: All three core requirements must be met
+    base_requirements_met = has_tf_alignment and has_good_rr and has_pattern_quality
+    
+    // Only continue if ALL base requirements are met
+    if base_requirements_met
+        // Add for volatility conditions (up to +0.5)
+        vol_rating = 0.0
+        if band_squeeze
+            vol_rating := vol_rating + 0.25
+            rating_reason := rating_reason + "✓ Band squeeze detected\n"
+        if band_expanding
+            vol_rating := vol_rating + 0.25
+            rating_reason := rating_reason + "✓ Expanding volatility\n"
+        
+        rating := rating + vol_rating
+        
+        // Add for pullback depth (up to +1.0)
+        depth_rating = 0.0
+        if use_depth_analysis 
+            if pullbackMeetsMinimum
+                if currentPullbackDepth >= 0.786
+                    depth_rating := 1.0
+                    rating_reason := rating_reason + "✓ Deep pullback (78.6%+)\n"
+                    has_deep_pullback := true
+                else if currentPullbackDepth >= 0.618
+                    depth_rating := 1.0
+                    rating_reason := rating_reason + "✓ Golden ratio pullback (61.8%+)\n"
+                    has_deep_pullback := true
+                else if currentPullbackDepth >= 0.5
+                    depth_rating := 0.75
+                    rating_reason := rating_reason + "✓ Half retracement (50%+)\n"
+                else if currentPullbackDepth >= 0.382
+                    depth_rating := 0.5
+                    rating_reason := rating_reason + "✓ Shallow pullback (38.2%+)\n"
+            
+        rating := rating + depth_rating
+        
+        // Special marking for deep pullbacks
+        if has_deep_pullback
+            rating_reason := "🔥 DEEP PULLBACK 🔥\n" + rating_reason
+        
+        hasVWAPAlignment =false
+         // VWAP alignment check - NOW INTEGRATED INTO MAIN RATING VARIABLE
+        if use_vwap_analysis
+            if isLong
+                // Check proximity between lower BB and Low/Average anchored VWAP
+                lowBBProximity = calculateVWAPProximity(lower, anchoredLo)
+                avgBBProximity = calculateVWAPProximity(lower, anchoredMean)
+                
+                if lowBBProximity or avgBBProximity
+                    rating := rating + 2.0 * vwap_weight
+                    hasVWAPAlignment := true
+                    
+                    // Add specific VWAP alignment details to the reason
+                    if lowBBProximity
+                        vwapDiff = math.abs(lower - anchoredLo) / lower * 100
+                        rating_reason := rating_reason + "✓ Low-anchored VWAP alignment (" + str.tostring(vwapDiff, "#.##") + "%)\n"
+                    else if avgBBProximity
+                        vwapDiff = math.abs(lower - anchoredMean) / lower * 100
+                        rating_reason := rating_reason + "✓ Average-anchored VWAP alignment (" + str.tostring(vwapDiff, "#.##") + "%)\n"
+            else
+                // Check proximity between upper BB and High/Average anchored VWAP
+                highBBProximity = calculateVWAPProximity(upper, anchoredHi)
+                avgBBProximity = calculateVWAPProximity(upper, anchoredMean)
+                
+                if highBBProximity or avgBBProximity
+                    rating := rating + 2.0 * vwap_weight
+                    hasVWAPAlignment := true
+                    
+                    // Add specific VWAP alignment details to the reason
+                    if highBBProximity
+                        vwapDiff = math.abs(upper - anchoredHi) / upper * 100
+                        rating_reason := rating_reason + "✓ High-anchored VWAP alignment (" + str.tostring(vwapDiff, "#.##") + "%)\n"
+                    else if avgBBProximity
+                        vwapDiff = math.abs(upper - anchoredMean) / upper * 100
+                        rating_reason := rating_reason + "✓ Average-anchored VWAP alignment (" + str.tostring(vwapDiff, "#.##") + "%)\n"
+        
+    else
+        // If ANY base requirements not met, reset rating to 0
+        rating := 0.0
+        missing_reasons = ""
+        if not has_tf_alignment
+            missing_reasons := missing_reasons + "❌ Insufficient timeframe alignment\n"
+        if not has_good_rr
+            missing_reasons := missing_reasons + "❌ Risk/reward ratio too low\n"
+        if not has_pattern_quality
+            missing_reasons := missing_reasons + "❌ No valid pattern detected\n"
+        // If VWAP analysis is enabled but no alignment exists, cap at 4 stars
+        if use_vwap_analysis and not hasVWAPAlignment
+            rating := math.min(rating, 4.0)
+            rating_reason := rating_reason + "\n❌ Missing VWAP alignment (required for 5 stars)"
+            
+        rating_reason := missing_reasons + rating_reason
+    
+    
+    
+    // Cap at 5 stars
+    final_rating = math.min(rating, 5.0)
+    [final_rating, rating_reason, has_deep_pullback, hasVWAPAlignment]
+
+    
+// ===== RISK/REWARD CALCULATION AND VISUALIZATION =====
+// Define trade structure
+type TradeInfo
+    box riskBox
+    box rewardBox
+    label infoLabel
+    float entryPrice
+    float stopPrice
+    float initialTargetPrice
+    int signalBar
+    float riskRewardRatio
+    bool isActive
+    int entryTime
+    float positionSize
+    string positionSizeUnit
+    string messageId  // New field to store Telegram message ID for reference
+    float starRating
+    string ratingReason
+    bool hasVWAPAlignment
+
+// Arrays to store multiple trades
+var TradeInfo[] longTrades = array.new<TradeInfo>()
+var TradeInfo[] shortTrades = array.new<TradeInfo>()
+
+// Function to create risk/reward boxes for a signal
+createRiskRewardBoxes(isLong, entryPrice, stopPrice, targetPrice, barIdx, rr_ratio, posSize, posSizeUnit, starRating, ratingReason) =>
+    var box riskBox = na
+    var box rewardBox = na
+    var label rrLabel = na
+    
+    if show_risk_reward and rr_ratio >= min_risk_reward
+        if isLong
+            // Create risk box (red) for long trade
+            riskBox := box.new(left=barIdx, top=entryPrice, right=barIdx + 20, bottom=stopPrice, bgcolor=color.new(color.red, risk_box_transp), border_color=color.red)
+            
+            // Create reward box (green) for long trade
+            rewardBox := box.new(left=barIdx, top=targetPrice, right=barIdx + 20, bottom=entryPrice, bgcolor=color.new(color.green, risk_box_transp), border_color=color.green)
+        else
+            // Create risk box (red) for short trade
+            riskBox := box.new(left=barIdx, top=stopPrice, right=barIdx + 20, bottom=entryPrice, bgcolor=color.new(color.red, risk_box_transp), border_color=color.red)
+            
+            // Create reward box (green) for short trade
+            rewardBox := box.new(left=barIdx, top=entryPrice, right=barIdx + 20, bottom=targetPrice, bgcolor=color.new(color.green, risk_box_transp), border_color=color.green)
+        
+        // Update label with new R:R info, position size, and Entry/SL/Target values
+        starText = ""
+        for i = 1 to math.round(starRating)
+            starText := starText + "⭐"
+            
+        // Update label with new R:R info, position size, and Entry/SL/Target values
+        labelText = "Entry: " + str.tostring(entryPrice, "#.#####") + "\nSL: " + str.tostring(stopPrice, "#.#####") + "\nTarget: " + str.tostring(targetPrice, "#.#####") + "\nR:R: " + str.tostring(rr_ratio, "#.##")
+
+        if show_position_size
+            labelText := labelText + "\nSize: " + str.tostring(posSize, "#.##") + " " + posSizeUnit
+        
+        // Add star rating
+        if show_star_rating
+            labelText := labelText + "\nRating: " + str.tostring(starRating, "#.#") + " " + starText
+            
+            // Add rating reasons if 4+ stars
+            if starRating >= 4.0
+                labelText := labelText + "\n\nRating Factors:\n" + ratingReason
+                
+        rrLabel := label.new(x=barIdx + 10, y=entryPrice, text=labelText, color=color.new(isLong ? color.green : color.red, 0), textcolor=color.white,size=size.small)
+    
+    [riskBox, rewardBox, rrLabel]
+
+// Function to update the risk/reward boxes with new target price
+updateRiskRewardBoxes(isLong, entryPrice, stopPrice, targetPrice, riskBox, rewardBox, rrLabel, posSize, posSizeUnit, starRating, ratingReason) =>
+    if show_risk_reward
+        risk = math.abs(entryPrice - stopPrice)
+        reward = math.abs(targetPrice - entryPrice)
+        
+        rr_ratio = reward / risk
+        
+        if rr_ratio >= min_risk_reward
+            if isLong
+                // Update reward box (green) for long trade
+                box.set_top(rewardBox, targetPrice)
+                
+            else
+                // Update reward box (green) for short trade
+                box.set_bottom(rewardBox, targetPrice)
+            
+            // Update label with new R:R info, position size, and Entry/SL/Target values
+            starText = ""
+            for i = 1 to math.round(starRating)
+                starText := starText + "⭐"
+            
+            // Update label with new R:R info, position size, and Entry/SL/Target values
+            labelText = "Entry: " + str.tostring(entryPrice, "#.#####") + "\nSL: " + str.tostring(stopPrice, "#.#####") + "\nTarget: " + str.tostring(targetPrice, "#.#####") + "\nR:R: " + str.tostring(rr_ratio, "#.##")
+
+            if show_position_size
+                labelText := labelText + "\nSize: " + str.tostring(posSize, "#.##") + " " + posSizeUnit
+            
+            // Add star rating
+            if show_star_rating
+                labelText := labelText + "\nRating: " + str.tostring(starRating, "#.#") + " " + starText
+                
+                // Add rating reasons if 4+ stars
+                if starRating >= 4.0
+                    labelText := labelText + "\n\nRating Factors:\n" + ratingReason
+                    
+            label.set_text(rrLabel, labelText)
+        
+        rr_ratio
+    else
+        0.0
+
+// Function to create Telegram signal message
+createTelegramSignalMessage(isLong, entryPrice, stopPrice, targetPrice, posSize, posSizeUnit, rr_ratio, starRating, ratingReason) =>
+    direction = isLong ? "BUY" : "SELL"
+    symbol = syminfo.ticker
+    timeframe = timeframe.period
+    emoji = isLong ? "🟢" : "🔴"
+    
+    // Create star text
+    starText = ""
+    for i = 1 to math.round(starRating)
+        starText := starText + "⭐"
+        
+    message = emoji + " " + direction + " SIGNAL: " + symbol + " (" + timeframe + ")\n\n" +"Entry: " + str.tostring(entryPrice, "#.#####") + "\n" +"Stop Loss: " + str.tostring(stopPrice, "#.#####") + "\n" +"Take Profit: " + str.tostring(targetPrice, "#.#####") + "\n" +"R:R: " + str.tostring(rr_ratio, "#.##") + "\n"+"Rating: " + str.tostring(starRating, "#.#") + " " + starText + "\n\n" +"Rating Factors:\n" + ratingReason + "\n"
+              
+    if show_position_size
+        message := message + "Position Size: " + str.tostring(posSize, "#.##") + " " + posSizeUnit + "\n"
+        
+    message := message + "\nTime: " + str.tostring(year) + "-" + str.tostring(month, "00") + "-" + str.tostring(dayofmonth, "00") + " " + str.tostring(hour, "00") + ":" + str.tostring(minute, "00")
+    
+    message
+
+//Function to create Telegram alert message for exit
+createTelegramExitMessage(isLong, exitPrice, entryPrice, stopPrice, targetPrice, posSize, posSizeUnit, exitType, originalMessageId) =>
+    direction = isLong ? "BUY" : "SELL"
+    symbol = syminfo.ticker
+    timeframe = timeframe.period
+    emoji = exitType == "TARGET_HIT" ? "✅" : exitType == "STOP_LOSS_HIT" ? "⛔" : "⏱️"
+    
+    // Calculate P/L in R
+    pnl = isLong ?  exitType == "TARGET_HIT" ? 1.0 : exitType == "STOP_LOSS_HIT" ? -1.0 : (exitPrice - entryPrice) / (entryPrice - stopPrice) :exitType == "TARGET_HIT" ? 1.0 : exitType == "STOP_LOSS_HIT" ? -1.0 : (entryPrice - exitPrice) / (stopPrice - entryPrice)
+    
+    pnlText = pnl >= 0 ? "+" + str.tostring(pnl, "#.##") + "R" : str.tostring(pnl, "#.##") + "R"
+    pnlEmoji = pnl >= 0 ? "💰" : "📉"
+    
+    exitTypeText = exitType == "TARGET_HIT" ? "TARGET HIT" : 
+                  exitType == "STOP_LOSS_HIT" ? "STOP LOSS HIT" : 
+                  "INTRADAY CLOSE"
+    
+    message = emoji + " " + exitTypeText + ": " + symbol + " (" + timeframe + ")\n\n" +
+              "Original " + direction + " signal closed\n" +
+              "Entry: " + str.tostring(entryPrice, "#.#####") + "\n" +
+              "Exit: " + str.tostring(exitPrice, "#.#####") + "\n" +
+              "Stop Loss: " + str.tostring(stopPrice, "#.#####") + "\n" +
+              "Take Profit: " + str.tostring(targetPrice, "#.#####") + "\n" +
+              "P/L: " + pnlText + " " + pnlEmoji + "\n"
+              
+    if show_position_size
+        message := message + "Position Size: " + str.tostring(posSize, "#.##") + " " + posSizeUnit + "\n"
+        
+    message := message + "\nTime: " + str.tostring(year) + "-" + str.tostring(month, "00") + "-" + str.tostring(dayofmonth, "00") + " " + str.tostring(hour, "00") + ":" + str.tostring(minute, "00")
+    
+    if not na(originalMessageId) and originalMessageId != ""
+        message := message + "\n\nOriginal Signal: " + originalMessageId
+        
+    message
+
+// Function to close a trade and mark it as intraday closure
+closeTrade(trade, isLong, currentPrice,reason) =>
+    // Calculate final P/L
+    pnl = isLong ? (currentPrice - trade.entryPrice) / (trade.entryPrice - trade.stopPrice) :(trade.entryPrice - currentPrice) / (trade.stopPrice - trade.entryPrice)
+    
+    // Update boxes
+    box.delete(trade.riskBox)
+    box.delete(trade.rewardBox)
+    
+    // Update label to show intraday closure
+    if show_intraday_closures
+        label.set_text(trade.infoLabel, "Intraday Close: " + str.tostring(pnl, "#.##") + "R")
+        label.set_color(trade.infoLabel, color.new(color.purple, 0))
+        label.set_textcolor(trade.infoLabel, color.white)
+    else
+        label.delete(trade.infoLabel)
+    
+    // Send Telegram notification if enabled
+    if telegram_enabled and send_sl_tp_notifications
+        exitMessage = createTelegramExitMessage(isLong, currentPrice, trade.entryPrice, trade.stopPrice, trade.initialTargetPrice, trade.positionSize, trade.positionSizeUnit, reason, trade.messageId)
+        alert(exitMessage, alert.freq_once_per_bar)
+    
+    // Mark trade as inactive
+    trade.isActive := false
+
+// Function to clean up completed trades and check for intraday closures
+cleanupCompletedTrades() =>
+    // Check if it's time to close intraday trades
+    isClosingTime = close_intraday and (time >= intraday_close_time)
+    
+    // Process long trades
+    if array.size(longTrades) > 0
+        for i = array.size(longTrades) - 1 to 0 by 1
+            trade = array.get(longTrades, i)
+            if trade.isActive
+                currentTargetPrice = dynamic_target ? upper : trade.initialTargetPrice
+                
+                // Update target price if dynamic targets are enabled
+                if dynamic_target
+                    trade.riskRewardRatio := updateRiskRewardBoxes(true, trade.entryPrice, trade.stopPrice, currentTargetPrice, trade.riskBox, trade.rewardBox, trade.infoLabel,trade.positionSize,trade.positionSizeUnit,trade.starRating, trade.ratingReason)
+                
+                // Check if target or stop is hit
+                if high >= currentTargetPrice 
+                    closeTrade(trade, true, currentTargetPrice, "TARGET_HIT")
+                    box.delete(trade.riskBox)
+                    box.delete(trade.rewardBox)
+                    label.delete(trade.infoLabel)
+                    trade.isActive := false
+                    array.remove(longTrades, i)
+                else if low <= trade.stopPrice
+                    closeTrade(trade, true, trade.stopPrice, "STOP_LOSS_HIT")
+                    box.delete(trade.riskBox)
+                    box.delete(trade.rewardBox)
+                    label.delete(trade.infoLabel)
+                    trade.isActive := false
+                    array.remove(longTrades, i)
+                // Check if it's time to close intraday
+                else if isClosingTime
+                    closeTrade(trade, true, close,"INTRADAY_CLOSE")
+                    array.remove(longTrades, i)
+            else
+                array.remove(longTrades, i)
+    
+    // Process short trades
+    if array.size(shortTrades) > 0
+        for i = array.size(shortTrades) - 1 to 0 by 1
+            trade = array.get(shortTrades, i)
+            if trade.isActive
+                currentTargetPrice = dynamic_target ? lower : trade.initialTargetPrice
+                
+                // Update target price if dynamic targets are enabled
+                if dynamic_target
+                    trade.riskRewardRatio := updateRiskRewardBoxes(false, trade.entryPrice, trade.stopPrice, currentTargetPrice, trade.riskBox, trade.rewardBox, trade.infoLabel,trade.positionSize,trade.positionSizeUnit,trade.starRating, trade.ratingReason)
+                
+                // Check if target or stop is hit
+                if low <= currentTargetPrice  
+                    closeTrade(trade, false, currentTargetPrice, "TARGET_HIT")
+                    box.delete(trade.riskBox)
+                    box.delete(trade.rewardBox)
+                    label.delete(trade.infoLabel)
+                    trade.isActive := false
+                    array.remove(shortTrades, i)
+                else if high >= trade.stopPrice
+                    closeTrade(trade, false, trade.stopPrice, "STOP_LOSS_HIT")
+                    box.delete(trade.riskBox)
+                    box.delete(trade.rewardBox)
+                    label.delete(trade.infoLabel)
+                    trade.isActive := false
+                    array.remove(shortTrades, i)
+                // Check if it's time to close intraday
+                else if isClosingTime
+                    closeTrade(trade, false, close,"INTRADAY_CLOSE")
+                    array.remove(shortTrades, i)
+            else
+                array.remove(shortTrades, i)
+
+
+// Plot VWAP levels when enabled
+plot(use_vwap_analysis ? anchoredHi : na, "High Anchor VWAP", color.new(color.red, 0), 2)
+plot(use_vwap_analysis ? anchoredLo : na, "Low Anchor VWAP", color.new(color.blue, 0), 2)
+plot(use_vwap_analysis ? anchoredMean : na, "Average Anchor VWAP", color.new(color.black, 50), 2)
+
+// Check for long signals and create risk/reward box if not already in a trade or if multiple trades are allowed
+any_long_signal = bb_bounce_long_filtered or double_bottom_long_filtered or squeeze_expansion_long_filtered or 
+                 middle_band_magnet_long_filtered or hammer_buy_filtered or bullish_rejection_filtered or
+                 inverted_hammer_buy_filtered or bullish_engulfing_filtered
+
+// Check for short signals and create risk/reward box if not already in a trade or if multiple trades are allowed
+any_short_signal = bb_bounce_short_filtered or double_top_short_filtered or band_contraction_short_filtered or 
+                  m_top_short_filtered or hanging_man_sell_filtered or bearish_rejection_filtered or
+                  shooting_star_sell_filtered or bearish_engulfing_filtered
+
+// Store signals for confirmed candles only
+var bool stored_long_signal = false
+var bool stored_short_signal = false
+var bool long_signal_triggered = false
+var bool short_signal_triggered = false
+// Variables to store VWAP alignment scores
+var float lastBuyVWAPScore = 0.0
+var float lastSellVWAPScore = 0.0
+
+// Function to create webhook payload
+createWebhookPayload(action, entryPrice, stopPrice, targetPrice, posSize, posSizeUnit, rr_ratio) =>
+    "{" + "  \"symbol\": \"" + syminfo.ticker + "\"," + "  \"timeframe\": \"" + timeframe.period + "\"," +  "  \"action\": \"" + action + "\"," +"  \"price\": " + str.tostring(entryPrice) + "," +"  \"stopLoss\": " + str.tostring(stopPrice) + "," +"  \"takeProfit\": " + str.tostring(targetPrice) + "," +"  \"positionSize\": " + str.tostring(posSize) + "," +"  \"positionUnit\": \"" + posSizeUnit + "\"," +"  \"riskReward\": " + str.tostring(rr_ratio) + "," +"  \"comment\": \"" + trade_comment + "\"," +"  \"timestamp\": " + str.tostring(timenow) + "}"
+
+// Only process signals on confirmed candles to prevent repainting
+if barstate.isconfirmed
+    // Store the signals
+    stored_long_signal := any_long_signal
+    stored_short_signal := any_short_signal
+    
+    // Clean up completed trades
+    cleanupCompletedTrades()
+    
+    // New long signal
+    if stored_long_signal and (allow_multiple_trades or array.size(longTrades) == 0) and array.size(longTrades) < max_trades
+        entryPrice = high  // Entry at the high of the candle for buy signals
+        rawStopPrice = low  // Stop at the low of the candle
+        stopPrice = applyStopLossBuffer(true, entryPrice, rawStopPrice)  // Apply buffer to stop loss
+        targetPrice = upper  // Target at upper Bollinger Band
+        
+        risk = math.abs(entryPrice - stopPrice)
+        reward = math.abs(targetPrice - entryPrice)
+        rr_ratio = reward / risk
+        
+        // Calculate position size
+        [posSize, posSizeUnit] = f_calculatePositionSize(true, entryPrice, stopPrice)
+        
+        [patternScore, patternType, hasPattern] = detectPatternQuality(true)
+        
+        // Calculate star rating
+        [starRating, ratingReason, patternQuality,hasVWAPAlignment] = calculateStarRating(true, rr_ratio)
+        
+       // Store scores for debug table using the new function
+        //[patternScore, patternType, hasPattern] = detectPatternQuality(true)
+        lastBuyPatternScore := patternScore
+        lastBuyPatternType := patternType
+
+        // Calculate alignment score
+        tf_alignment = (inUptrend1 ? 1.0 : 0.0) + (inUptrend2 ? 1.0 : 0.0) + (inUptrend3 ? 1.0 : 0.0) + (inUptrend4 ? 1.0 : 0.0)
+        lastBuyAlignmentScore := (tf_alignment / 4.0) * 2.0 * tf_alignment_weight
+        
+        // Calculate depth score
+        lastBuyDepthScore := use_depth_analysis ? (pullbackMeetsMinimum ? 1.0 : 0.0) : 0.0
+        
+        // Calculate R:R score
+        lastBuyRRScore := rr_ratio >= rr_5star ? 2.0 : rr_ratio >= rr_4star ? 1.0 : 0.0
+        
+        // Update these when calculating star ratings
+        if stored_long_signal
+            lastBuyVWAPScore := checkLongVWAPAlignment() ? 2.0 * vwap_weight : 0.0
+
+        if stored_short_signal
+            lastSellVWAPScore := checkShortVWAPAlignment() ? 2.0 * vwap_weight : 0.0
+
+        // Store star rating
+        lastBuyStarRating := starRating
+        
+        if rr_ratio >= min_risk_reward and starRating >= min_star_rating and (not use_depth_analysis or pullbackMeetsMinimum)
+            // Create new boxes
+            [newRiskBox, newRewardBox, newLabel] = createRiskRewardBoxes(true, entryPrice, stopPrice, targetPrice, bar_index, rr_ratio, posSize, posSizeUnit, starRating, ratingReason)
+            
+            // Create new trade info
+            newTrade = TradeInfo.new()
+            newTrade.riskBox := newRiskBox
+            newTrade.rewardBox := newRewardBox
+            newTrade.infoLabel := newLabel
+            newTrade.entryPrice := entryPrice
+            newTrade.stopPrice := stopPrice
+            newTrade.initialTargetPrice := targetPrice
+            newTrade.signalBar := bar_index
+            newTrade.riskRewardRatio := rr_ratio
+            newTrade.isActive := true
+            newTrade.entryTime := time
+            newTrade.positionSize := posSize
+            newTrade.positionSizeUnit := posSizeUnit
+            newTrade.starRating := starRating
+            newTrade.ratingReason := ratingReason
+            newTrade.hasVWAPAlignment := hasVWAPAlignment
+            // Create message ID that's more reliable for reference
+            messageId = str.tostring(timenow) + "_" + syminfo.ticker + "_LONG"
+            newTrade.messageId := messageId
+            
+            // Add to trades array
+            array.push(longTrades, newTrade)
+            
+            // Set trigger for webhook alert
+            long_signal_triggered := true
+            
+            // Send signal alert
+            if telegram_enabled
+                signalMessage = createTelegramSignalMessage(true, entryPrice, stopPrice, targetPrice, posSize, posSizeUnit, rr_ratio, starRating, ratingReason)
+                alert(signalMessage, alert.freq_once_per_bar)
+    
+    // New short signal
+    if stored_short_signal and (allow_multiple_trades or array.size(shortTrades) == 0) and array.size(shortTrades) < max_trades
+        entryPrice = low  // Entry at the low of the candle for sell signals
+        rawStopPrice = high  // Stop at the high of the candle
+        stopPrice = applyStopLossBuffer(false, entryPrice, rawStopPrice)  // Apply buffer to stop loss
+        targetPrice = lower  // Target at lower Bollinger Band
+        
+        risk = math.abs(entryPrice - stopPrice)
+        reward = math.abs(targetPrice - entryPrice)
+        rr_ratio = reward / risk
+        
+        // Calculate position size
+        [posSize, posSizeUnit] = f_calculatePositionSize(false, entryPrice, stopPrice)
+        
+        // Calculate star rating
+        [starRating, ratingReason, patternQuality,hasVWAPAlignment] = calculateStarRating(false, rr_ratio)
+        
+        // Store scores for debug table using the new function
+        [patternScore, patternType, hasPattern] = detectPatternQuality(false)
+        lastSellPatternScore := patternScore
+        lastSellPatternType := patternType
+        
+        // Calculate alignment score
+        tf_alignment = (inDowntrend1 ? 1.0 : 0.0) + (inDowntrend2 ? 1.0 : 0.0) + (inDowntrend3 ? 1.0 : 0.0) + (inDowntrend4 ? 1.0 : 0.0)
+        lastSellAlignmentScore := (tf_alignment / 4.0) * 2.0 * tf_alignment_weight
+        
+        // Calculate depth score
+        lastSellDepthScore := use_depth_analysis ? (pullbackMeetsMinimum ? 1.0 : 0.0) : 0.0
+        
+        // Calculate R:R score
+        lastSellRRScore := rr_ratio >= rr_5star ? 2.0 : rr_ratio >= rr_4star ? 1.0 : 0.0
+        
+        // Store star rating
+        lastSellStarRating := starRating
+        
+        if rr_ratio >= min_risk_reward and starRating >= min_star_rating and (not use_depth_analysis or pullbackMeetsMinimum)
+            // Create new boxes
+            [newRiskBox, newRewardBox, newLabel] = createRiskRewardBoxes(false, entryPrice, stopPrice, targetPrice, bar_index, rr_ratio, posSize, posSizeUnit, starRating, ratingReason)
+            
+            // Create new trade info
+            newTrade = TradeInfo.new()
+            newTrade.riskBox := newRiskBox
+            newTrade.rewardBox := newRewardBox
+            newTrade.infoLabel := newLabel
+            newTrade.entryPrice := entryPrice
+            newTrade.stopPrice := stopPrice
+            newTrade.initialTargetPrice := targetPrice
+            newTrade.signalBar := bar_index
+            newTrade.riskRewardRatio := rr_ratio
+            newTrade.isActive := true
+            newTrade.entryTime := time
+            newTrade.positionSize := posSize
+            newTrade.positionSizeUnit := posSizeUnit
+            newTrade.starRating := starRating
+            newTrade.ratingReason := ratingReason
+            
+            // Create message ID that's more reliable for reference
+            messageId = str.tostring(timenow) + "_" + syminfo.ticker + "_SHORT"
+            newTrade.messageId := messageId
+            
+            // Add to trades array
+            array.push(shortTrades, newTrade)
+            
+            // Set trigger for webhook alert
+            short_signal_triggered := true
+            
+            // Send signal alert
+            if telegram_enabled
+                signalMessage = createTelegramSignalMessage(false, entryPrice, stopPrice, targetPrice, posSize, posSizeUnit, rr_ratio, starRating, ratingReason)
+                alert(signalMessage, alert.freq_once_per_bar)
+
+// Add star rating table
+var table starRatingTable = na
+
+if show_star_rating_table
+    starRatingTable = table.new(position.top_center, 2, 7, border_width=1)
+
+    if barstate.islast
+        table.cell(starRatingTable, 0, 0, "Star Rating System", bgcolor=color.gray, text_color=color.white)
+        table.cell(starRatingTable, 1, 0, show_star_rating ? "ENABLED" : "DISABLED", bgcolor=show_star_rating ? color.green : color.red, text_color=color.white)
+        
+        table.cell(starRatingTable, 0, 1, "Timeframe Alignment", bgcolor=color.gray, text_color=color.white)
+        table.cell(starRatingTable, 1, 1, "Up to +2 ⭐", bgcolor=color.new(color.blue, 70), text_color=color.white)
+        
+        table.cell(starRatingTable, 0, 2, "Risk/Reward Ratio", bgcolor=color.gray, text_color=color.white)
+        table.cell(starRatingTable, 1, 2, "Up to +2 ⭐", bgcolor=color.new(color.blue, 70), text_color=color.white)
+        
+        table.cell(starRatingTable, 0, 3, "Pattern Quality", bgcolor=color.gray, text_color=color.white)
+        table.cell(starRatingTable, 1, 3, "Up to +1 ⭐", bgcolor=color.new(color.blue, 70), text_color=color.white)
+        
+        table.cell(starRatingTable, 0, 4, "Volatility Conditions", bgcolor=color.gray, text_color=color.white)
+        table.cell(starRatingTable, 1, 4, "Up to +1 ⭐", bgcolor=color.new(color.blue, 70), text_color=color.white)
+        
+        table.cell(starRatingTable, 0, 5, "Telegram Alerts", bgcolor=color.gray, text_color=color.white)
+        table.cell(starRatingTable, 1, 5, "Only 5 ⭐ Signals", bgcolor=color.new(color.yellow, 30), text_color=color.white)
+
+        // Add VWAP alignment row
+        table.cell(starRatingTable, 0, 6, "VWAP Alignment", bgcolor=color.gray, text_color=color.white)
+        if use_vwap_analysis
+            table.cell(starRatingTable, 1, 6, hasVWAPAlignment ? "✓ PRESENT" : "❌ REQUIRED FOR 5★", bgcolor=hasVWAPAlignment ? color.green : color.red, text_color=color.white)
+        else
+            table.cell(starRatingTable, 1, 6, "DISABLED", bgcolor=color.gray, text_color=color.white)
+
+// Add risk management table
+var table riskTable = na
+
+if show_risk_table
+    riskTable = table.new(position.top_right, 2, 7, border_width=1)
+
+    if barstate.islast
+        // Update risk management table
+        table.cell(riskTable, 0, 0, "Account Capital", bgcolor=color.gray, text_color=color.white)
+        table.cell(riskTable, 1, 0, str.tostring(account_capital, "#,##0"), bgcolor=color.gray, text_color=color.white)
+        
+        table.cell(riskTable, 0, 1, "Risk Per Trade", bgcolor=color.gray, text_color=color.white)
+        table.cell(riskTable, 1, 1, str.tostring((account_capital * risk_percentage) / 100, "#,##0") + " " + account_currency, bgcolor=color.gray, text_color=color.white)
+        
+        table.cell(riskTable, 0, 2, "Instrument Type", bgcolor=color.gray, text_color=color.white)
+        table.cell(riskTable, 1, 2, instrument_type, bgcolor=color.gray, text_color=color.white)
+        
+        table.cell(riskTable, 0, 3, "Account Currency", bgcolor=color.gray, text_color=color.white)
+        table.cell(riskTable, 1, 3, account_currency, bgcolor=color.gray, text_color=color.white)
+        
+        if instrument_type == "Forex"
+            table.cell(riskTable, 0, 4, "Leverage", bgcolor=color.gray, text_color=color.white)
+            table.cell(riskTable, 1, 4, str.tostring(leverage) + "x", bgcolor=color.gray, text_color=color.white)
+        
+        table.cell(riskTable, 0, 5, "Fixed Lot Size", bgcolor=color.gray, text_color=color.white)
+        table.cell(riskTable, 1, 5, fixed_lot_size ? "YES (" + str.tostring(lot_size_value) + ")" : "NO", bgcolor=color.gray, text_color=color.white)
+        
+        // Auto Trading Status
+        table.cell(riskTable, 0, 6, "Auto Trading", bgcolor=color.gray, text_color=color.white)
+        table.cell(riskTable, 1, 6, enable_auto_trading ? "ENABLED" : "DISABLED", bgcolor=enable_auto_trading ? color.green : color.red, text_color=color.white)
+
+// Add Telegram notification status table
+var table telegramTable = na
+
+if show_telegram_table
+    telegramTable= table.new(position.bottom_left, 2, 3, border_width=1)
+
+    if barstate.islast
+        table.cell(telegramTable, 0, 0, "Telegram Notifications", bgcolor=color.gray, text_color=color.white)
+        table.cell(telegramTable, 1, 0, telegram_enabled ? "ENABLED" : "DISABLED", bgcolor=telegram_enabled ? color.green : color.red, text_color=color.white)
+        
+        table.cell(telegramTable, 0, 1, "Signal Notifications", bgcolor=color.gray, text_color=color.white)
+        table.cell(telegramTable, 1, 1, telegram_enabled ? "ON" : "OFF", bgcolor=telegram_enabled ? color.green : color.gray, text_color=color.white)
+        
+        table.cell(telegramTable, 0, 2, "SL/TP Notifications", bgcolor=color.gray, text_color=color.white)
+        table.cell(telegramTable, 1, 2, send_sl_tp_notifications ? "ON" : "OFF", bgcolor=send_sl_tp_notifications ? color.green : color.gray, text_color=color.white)
+
+// Add debug table to show trend and signal status
+var table debugTable = na
+
+if show_debug_table
+    debugTable = table.new(position.bottom_right, 2, 19, border_width=1)
+
+    if barstate.islast
+        table.cell(debugTable, 0, 0, "TF1 Status", bgcolor=color.gray, text_color=color.white)
+        table.cell(debugTable, 1, 0, inUptrend1 ? "UPTREND" : "DOWNTREND", bgcolor=inUptrend1 ? upColor : downColor, text_color=color.white)
+        
+        // Active trade information
+        table.cell(debugTable, 0, 5, "Long Trades Active", bgcolor=color.gray, text_color=color.white)
+        table.cell(debugTable, 1, 5, str.tostring(array.size(longTrades)), bgcolor=array.size(longTrades) > 0 ? color.green : color.gray, text_color=color.white)
+        
+        table.cell(debugTable, 0, 6, "Short Trades Active", bgcolor=color.gray, text_color=color.white)
+        table.cell(debugTable, 1, 6, str.tostring(array.size(shortTrades)), bgcolor=array.size(shortTrades) > 0 ? color.red : color.gray, text_color=color.white)
+        
+        // Risk/Reward information
+        table.cell(debugTable, 0, 7, "Current R:R", bgcolor=color.gray, text_color=color.white)
+        
+        if array.size(longTrades) > 0
+            trade = array.get(longTrades, array.size(longTrades) - 1)
+            table.cell(debugTable, 1, 7, str.tostring(trade.riskRewardRatio, "#.##"), bgcolor=trade.riskRewardRatio >= min_risk_reward ? color.green : color.gray, text_color=color.white)
+        else if array.size(shortTrades) > 0
+            trade = array.get(shortTrades, array.size(shortTrades) - 1)
+            table.cell(debugTable, 1, 7, str.tostring(trade.riskRewardRatio, "#.##"), bgcolor=trade.riskRewardRatio >= min_risk_reward ? color.red : color.gray, text_color=color.white)
+        else
+            table.cell(debugTable, 1, 7, "N/A", bgcolor=color.gray, text_color=color.white)
+        
+        // Dynamic target information
+        table.cell(debugTable, 0, 8, "Dynamic Target", bgcolor=color.gray, text_color=color.white)
+        table.cell(debugTable, 1, 8, dynamic_target ? "YES" : "NO", bgcolor=dynamic_target ? color.blue : color.gray, text_color=color.white)
+        
+        // Multiple trades information
+        table.cell(debugTable, 0, 9, "Multiple Trades", bgcolor=color.gray, text_color=color.white)
+        table.cell(debugTable, 1, 9, allow_multiple_trades ? "YES" : "NO", bgcolor=allow_multiple_trades ? color.blue : color.gray, text_color=color.white)
+        
+        // Intraday closure information
+        table.cell(debugTable, 0, 10, "Intraday Close", bgcolor=color.gray, text_color=color.white)
+        table.cell(debugTable, 1, 10, close_intraday ? "YES" : "NO", bgcolor=close_intraday ? color.purple : color.gray, text_color=color.white)
+        
+        // Star rating information
+        table.cell(debugTable, 0, 11, "Star Rating", bgcolor=color.gray, text_color=color.white)
+        
+        if array.size(longTrades) > 0
+            trade = array.get(longTrades, array.size(longTrades) - 1)
+            starText = ""
+            for i = 1 to math.round(trade.starRating)
+                starText := starText + "⭐"
+            table.cell(debugTable, 1, 11, str.tostring(trade.starRating, "#.#") + " " + starText, bgcolor=trade.starRating >= 5.0 ? color.new(color.yellow, 30) : trade.starRating >= 4.0 ? color.new(color.lime, 30) : color.new(color.green, 30), text_color=color.white)
+        else if array.size(shortTrades) > 0
+            trade = array.get(shortTrades, array.size(shortTrades) - 1)
+            starText = ""
+            for i = 1 to math.round(trade.starRating)
+                starText := starText + "⭐"
+            table.cell(debugTable, 1, 11, str.tostring(trade.starRating, "#.#") + " " + starText, bgcolor=trade.starRating >= 5.0 ? color.new(color.yellow, 30) : trade.starRating >= 4.0 ? color.new(color.lime, 30) : color.new(color.red, 30), text_color=color.white)
+        else
+            table.cell(debugTable, 1, 11, "N/A", bgcolor=color.gray, text_color=color.white)
+        
+        // Add to the debug table
+        table.cell(debugTable, 0, 12, "SL Buffer", bgcolor=color.gray, text_color=color.white)
+        table.cell(debugTable, 1, 12, use_sl_buffer ? str.tostring(sl_buffer_percentage, "#.#") + "%" : "OFF", bgcolor=use_sl_buffer ? color.blue : color.gray, text_color=color.white)
+        
+        // Add depth analysis information to debug table
+        table.cell(debugTable, 0, 13, "Depth Analysis", bgcolor=color.gray, text_color=color.white)
+        table.cell(debugTable, 1, 13, use_depth_analysis ? "ENABLED" : "DISABLED", bgcolor=use_depth_analysis ? color.green : color.gray, text_color=color.white)
+        
+        table.cell(debugTable, 0, 14, "Current Pullback", bgcolor=color.gray, text_color=color.white)
+        table.cell(debugTable, 1, 14, str.tostring(currentPullbackDepth * 100, "#.#") + "%", bgcolor=pullbackMeetsMinimum ? color.green : color.red, text_color=color.white)
+        
+        table.cell(debugTable, 0, 15, "Min Required", bgcolor=color.gray, text_color=color.white)
+        table.cell(debugTable, 1, 15, str.tostring(min_pullback_depth * 100, "#.#") + "%", bgcolor=color.gray, text_color=color.white)
+        
+        table.cell(debugTable, 0, 16, "Analysis TF", bgcolor=color.gray, text_color=color.white)
+        table.cell(debugTable, 1, 16, pullback_tf_selection, bgcolor=color.gray, text_color=color.white)
+        
+        // Add calculation details to debug table
+        table.cell(debugTable, 0, 17, "HTF Close", bgcolor=color.gray, text_color=color.white)
+        table.cell(debugTable, 1, 17, str.tostring(htf_close, "#.##"), bgcolor=color.gray, text_color=color.white)
+        
+        table.cell(debugTable, 0, 18, "Calculation", bgcolor=color.gray, text_color=color.white)
+        if tfUptrend
+            table.cell(debugTable, 1, 18, "(" + str.tostring(highLevel, "#.##") + " - " + str.tostring(htf_close, "#.##") + ") / (" + str.tostring(highLevel, "#.##") + " - " + str.tostring(lowLevel, "#.##") + ")", bgcolor=color.gray, text_color=color.white)
+        else
+            table.cell(debugTable, 1, 18, "(" + str.tostring(htf_close, "#.##") + " - " + str.tostring(lowLevel, "#.##") + ") / (" + str.tostring(highLevel, "#.##") + " - " + str.tostring(lowLevel, "#.##") + ")", bgcolor=color.gray, text_color=color.white)
+    
+    // Add this to visualize the swing points and current HTF price
+    if use_depth_analysis
+        label.new(bar_index, highLevel, "Swing High (" + pullback_tf_selection +  ")", color=color.red, style=label.style_label_down, textcolor=color.white)
+        label.new(bar_index, lowLevel, "Swing Low (" + pullback_tf_selection + ")", color=color.green, style=label.style_label_up, textcolor=color.white)
+        //label.new(bar_index, htf_close, "HTF Close (" + pullback_tf_selection + ")", color=color.blue, style=label.style_label_right, textcolor=color.white)
+
+// Create signal scoring debug table
+var table scoringTable = na
+
+if show_scoring_table
+    scoringTable = table.new(position.middle_left, 3, 7, border_width=1)
+
+    if barstate.islast
+        // Table header
+        table.cell(scoringTable, 0, 0, "Signal Component", bgcolor=color.gray, text_color=color.white)
+        table.cell(scoringTable, 1, 0, "Buy Score", bgcolor=color.gray, text_color=color.white)
+        table.cell(scoringTable, 2, 0, "Sell Score", bgcolor=color.gray, text_color=color.white)
+        
+        // Pattern quality
+        table.cell(scoringTable, 0, 1, "Pattern Quality", bgcolor=color.gray, text_color=color.white)
+        table.cell(scoringTable, 1, 1, str.tostring(lastBuyPatternScore, "#.#"), bgcolor=lastBuyPatternScore > 0 ? color.green : color.gray, text_color=color.white)
+        table.cell(scoringTable, 2, 1, str.tostring(lastSellPatternScore, "#.#"), bgcolor=lastSellPatternScore > 0 ? color.red : color.gray, text_color=color.white)
+        
+        // Timeframe alignment
+        table.cell(scoringTable, 0, 2, "TF Alignment", bgcolor=color.gray, text_color=color.white)
+        table.cell(scoringTable, 1, 2, str.tostring(lastBuyAlignmentScore, "#.#"), bgcolor=lastBuyAlignmentScore > 0 ? color.green : color.gray, text_color=color.white)
+        table.cell(scoringTable, 2, 2, str.tostring(lastSellAlignmentScore, "#.#"), bgcolor=lastSellAlignmentScore > 0 ? color.red : color.gray, text_color=color.white)
+        
+        // Pullback depth
+        table.cell(scoringTable, 0, 3, "Pullback Depth", bgcolor=color.gray, text_color=color.white)
+        table.cell(scoringTable, 1, 3, str.tostring(lastBuyDepthScore, "#.#"), bgcolor=lastBuyDepthScore > 0 ? color.green : color.gray, text_color=color.white)
+        table.cell(scoringTable, 2, 3, str.tostring(lastSellDepthScore, "#.#"), bgcolor=lastSellDepthScore > 0 ? color.red : color.gray, text_color=color.white)
+        
+        // Risk/Reward
+        table.cell(scoringTable, 0, 4, "Risk/Reward", bgcolor=color.gray, text_color=color.white)
+        table.cell(scoringTable, 1, 4, str.tostring(lastBuyRRScore, "#.#"), bgcolor=lastBuyRRScore > 0 ? color.green : color.gray, text_color=color.white)
+        table.cell(scoringTable, 2, 4, str.tostring(lastSellRRScore, "#.#"), bgcolor=lastSellRRScore > 0 ? color.red : color.gray, text_color=color.white)
+        
+        // NEW: VWAP Alignment
+        table.cell(scoringTable, 0, 5, "VWAP Alignment", bgcolor=color.gray, text_color=color.white)
+        if use_vwap_analysis
+            // Calculate VWAP scores for display
+            buyVWAPScore = checkLongVWAPAlignment() ? 2.0 * vwap_weight : 0.0
+            sellVWAPScore = checkShortVWAPAlignment() ? 2.0 * vwap_weight : 0.0
+            
+            table.cell(scoringTable, 1, 5, str.tostring(buyVWAPScore, "#.#"), 
+                      bgcolor=buyVWAPScore > 0 ? color.green : color.gray, 
+                      text_color=color.white)
+            table.cell(scoringTable, 2, 5, str.tostring(sellVWAPScore, "#.#"), 
+                      bgcolor=sellVWAPScore > 0 ? color.red : color.gray, 
+                      text_color=color.white)
+        else
+            table.cell(scoringTable, 1, 5, "Disabled", bgcolor=color.gray, text_color=color.white)
+            table.cell(scoringTable, 2, 5, "Disabled", bgcolor=color.gray, text_color=color.white)
+            
+        // Total star rating
+        table.cell(scoringTable, 0, 6, "Star Rating", bgcolor=color.gray, text_color=color.white)
+        table.cell(scoringTable, 1, 6, str.tostring(lastBuyStarRating, "#.#"), bgcolor=lastBuyStarRating >= min_star_rating ? color.green : color.gray, text_color=color.white)
+        table.cell(scoringTable, 2, 6, str.tostring(lastSellStarRating, "#.#"), bgcolor=lastSellStarRating >= min_star_rating ? color.red : color.gray, text_color=color.white)
+
+// Auto Trading Alerts
+// Long Entry Alert with Webhook
+if enable_auto_trading and long_signal_triggered and barstate.isconfirmed
+    trade = array.get(longTrades, array.size(longTrades) - 1)
+    alert_message = "BUY SIGNAL: " + syminfo.ticker + " at " + str.tostring(trade.entryPrice) + ", SL: " + str.tostring(trade.stopPrice) + ", TP: " + str.tostring(trade.initialTargetPrice) + ", Size: " + str.tostring(trade.positionSize) + " " + trade.positionSizeUnit
+    
+    if webhook_enabled
+        webhook_payload = createWebhookPayload("BUY", trade.entryPrice, trade.stopPrice, trade.initialTargetPrice, trade.positionSize, trade.positionSizeUnit, trade.riskRewardRatio)
+        alert(webhook_payload, alert.freq_once_per_bar)
+    else
+        alert(alert_message, alert.freq_once_per_bar)
+    
+    long_signal_triggered := false
+
+// Short Entry Alert with Webhook
+if enable_auto_trading and short_signal_triggered and barstate.isconfirmed
+    trade = array.get(shortTrades, array.size(shortTrades) - 1)
+    alert_message = "SELL SIGNAL: " + syminfo.ticker + " at " + str.tostring(trade.entryPrice) + ", SL: " + str.tostring(trade.stopPrice) + ", TP: " + str.tostring(trade.initialTargetPrice) + ", Size: " + str.tostring(trade.positionSize) + " " + trade.positionSizeUnit
+    
+    if webhook_enabled
+        webhook_payload = createWebhookPayload("SELL", trade.entryPrice, trade.stopPrice, trade.initialTargetPrice, trade.positionSize, trade.positionSizeUnit, trade.riskRewardRatio)
+        alert(webhook_payload, alert.freq_once_per_bar)
+    else
+        alert(alert_message, alert.freq_once_per_bar)
+    
+    short_signal_triggered := false
+
+// ===== PLOTTING =====
+// Plot Bollinger Bands
+//plot(middle, "Middle Band", color.blue)
+//p1 = plot(upper, "Upper Band", color.green)
+//p2 = plot(lower, "Lower Band", color.green)
+//fill(p1, p2, color.new(color.blue, 95))
+
+// Plot signals - only show signals that align with the current trend direction
+// For uptrend: only show long signals
+// For downtrend: only show short signals
+
+// Long signals - only show in uptrend or if unfiltered signals are enabled
+plotshape(show_unfiltered_signals and bb_bounce_long_condition and not bb_bounce_long_filtered, "BB Bounce Long (Unfiltered)", shape.triangleup, location.belowbar, color.new(color.green, 70), size=size.tiny)
+plotshape(bb_bounce_long_filtered, "BB Bounce Long (TF1 Aligned)", shape.triangleup, location.belowbar, color.green, size=size.small)
+
+plotshape(show_unfiltered_signals and double_bottom_long_condition and not double_bottom_long_filtered, "Double Bottom Long (Unfiltered)", shape.triangleup, location.belowbar, color.new(color.lime, 70), size=size.tiny)
+plotshape(double_bottom_long_filtered, "Double Bottom Long (TF1 Aligned)", shape.triangleup, location.belowbar, color.lime, size=size.small)
+
+plotshape(show_unfiltered_signals and hammer_buy_signal and not hammer_buy_filtered, "Hammer Buy Signal (Unfiltered)", shape.triangleup, location.belowbar, color.new(color.yellow, 70), size=size.tiny)
+plotshape(hammer_buy_filtered, "Hammer Buy Signal (TF1 Aligned)", shape.triangleup, location.belowbar, color.yellow, size=size.small)
+
+// Short signals - only show in downtrend or if unfiltered signals are enabled
+plotshape(show_unfiltered_signals and bb_bounce_short_condition and not bb_bounce_short_filtered, "BB Bounce Short (Unfiltered)", shape.triangledown, location.abovebar, color.new(color.red, 70), size=size.tiny)
+plotshape(bb_bounce_short_filtered, "BB Bounce Short (TF1 Aligned)", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+plotshape(show_unfiltered_signals and double_top_short_condition and not double_top_short_filtered, "Double Top Short (Unfiltered)", shape.triangledown, location.abovebar, color.new(color.maroon, 70), size=size.tiny)
+plotshape(double_top_short_filtered, "Double Top Short (TF1 Aligned)", shape.triangledown, location.abovebar, color.maroon, size=size.small)
+
+plotshape(show_unfiltered_signals and hanging_man_sell_signal and not hanging_man_sell_filtered, "Hanging Man Sell Signal (Unfiltered)", shape.triangledown, location.abovebar, color.new(color.yellow, 70), size=size.tiny)
+plotshape(hanging_man_sell_filtered, "Hanging Man Sell Signal (TF1 Aligned)", shape.triangledown, location.abovebar, color.yellow, size=size.small)
+
+// Plot rejection candle signals
+plotshape(show_unfiltered_signals and bullish_rejection_at_bb and not bullish_rejection_filtered, "Bullish Rejection (Unfiltered)", shape.triangleup, location.belowbar, color.new(color.purple, 70), size=size.tiny)
+plotshape(bullish_rejection_filtered, "Bullish Rejection (TF1 Aligned)", shape.triangleup, location.belowbar, color.purple, size=size.small)
+
+plotshape(show_unfiltered_signals and bearish_rejection_at_bb and not bearish_rejection_filtered, "Bearish Rejection (Unfiltered)", shape.triangledown, location.abovebar, color.new(color.purple, 70), size=size.tiny)
+plotshape(bearish_rejection_filtered, "Bearish Rejection (TF1 Aligned)", shape.triangledown, location.abovebar, color.purple, size=size.small)
+
+// ===== ALERTS =====
+// Original alerts
+alertcondition(bb_bounce_long_condition, "BB Bounce Long", "Bollinger Band Bounce Long Signal")
+alertcondition(double_bottom_long_condition, "Double Bottom Long", "Double Bottom at Lower Band Long Signal")
+alertcondition(hammer_buy_signal, "Hammer Buy Signal", "Hammer Pattern Near Lower Bollinger Band")
+
+alertcondition(bb_bounce_short_condition, "BB Bounce Short", "Bollinger Band Bounce Short Signal")
+alertcondition(double_top_short_condition, "Double Top Short", "Double Top at Upper Band Short Signal")
+alertcondition(hanging_man_sell_signal, "Hanging Man Sell Signal", "Hanging Man Pattern Near Upper Bollinger Band")
+
+// Filtered alerts (with TF1 alignment)
+alertcondition(bb_bounce_long_filtered, "BB Bounce Long (TF1 Aligned)", "Bollinger Band Bounce Long Signal with TF1 Bullish")
+alertcondition(double_bottom_long_filtered, "Double Bottom Long (TF1 Aligned)", "Double Bottom at Lower Band Long Signal with TF1 Bullish")
+alertcondition(hammer_buy_filtered, "Hammer Buy Signal (TF1 Aligned)", "Hammer Pattern Near Lower Bollinger Band with TF1 Bullish")
+
+alertcondition(bb_bounce_short_filtered, "BB Bounce Short (TF1 Aligned)", "Bollinger Band Bounce Short Signal with TF1 Bearish")
+alertcondition(double_top_short_filtered, "Double Top Short (TF1 Aligned)", "Double Top at Upper Band Short Signal with TF1 Bearish")
+alertcondition(hanging_man_sell_filtered, "Hanging Man Sell Signal (TF1 Aligned)", "Hanging Man Pattern Near Upper Bollinger Band with TF1 Bearish")
+
+// Rejection candle alerts
+alertcondition(bullish_rejection_at_bb, "Bullish Rejection", "Bullish Rejection Candle at Lower Bollinger Band")
+alertcondition(bearish_rejection_at_bb, "Bearish Rejection", "Bearish Rejection Candle at Upper Bollinger Band")
+
+alertcondition(bullish_rejection_filtered, "Bullish Rejection (TF1 Aligned)", "Bullish Rejection Candle with TF1 Bullish")
+alertcondition(bearish_rejection_filtered, "Bearish Rejection (TF1 Aligned)", "Bearish Rejection Candle with TF1 Bearish")
+
+// Market structure alerts
+alertcondition(ta.change(inUptrend1, 1), "TF1 Trend Change to Bullish", "First Timeframe Trend Changed to Bullish")
+alertcondition(ta.change(inDowntrend1, 1), "TF1 Trend Change to Bearish", "First Timeframe Trend Changed to Bearish")
